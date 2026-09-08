@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { EngineError } from "../errors.js";
-import { workspaceHome } from "../service/root.js";
+import { workspaceIndexLocation } from "../service/root.js";
 
 export type DaemonLeaseRecord = {
   pid: number;
@@ -22,11 +22,11 @@ export type DaemonLeaseRecord = {
 };
 
 export function daemonLeasePath(root: string): string {
-  return join(workspaceHome(root), "locks", "daemon.json");
+  return join(workspaceIndexLocation(root).home, "locks", "daemon.json");
 }
 
 export function daemonLeaseGuardPath(root: string): string {
-  return join(workspaceHome(root), "locks", "daemon.guard");
+  return join(workspaceIndexLocation(root).home, "locks", "daemon.guard");
 }
 
 export type DaemonLeaseGuard = {

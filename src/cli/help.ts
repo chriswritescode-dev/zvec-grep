@@ -27,7 +27,9 @@ export function printHelp(version: string, topic?: string): void {
 
 const ENVIRONMENT_VARIABLES = {
   ZVEC_GREP_HOME:
-    "Runtime and daemon state directory; Workspace indexes stay under <root>/.zvec-grep",
+    "Runtime and daemon state directory; default root for workspace index storage",
+  ZVEC_GREP_INDEX_HOME:
+    "Workspace index storage: 'project' keeps indexes in <workspace>/.zvec-grep, a path stores all indexes under that directory (default: <ZVEC_GREP_HOME>/workspaces)",
   ZVEC_GREP_MODE: "Default client mode: direct, server, or auto",
   ZVEC_GREP_SERVER_URL: "MCP server URL used by CLI clients",
   ZVEC_GREP_SERVER_TOKEN: "Server/client Bearer token",
@@ -64,6 +66,7 @@ type EnvironmentVariableName = keyof typeof ENVIRONMENT_VARIABLES;
 
 const MAIN_ENVIRONMENT_VARIABLES: readonly EnvironmentVariableName[] = [
   "ZVEC_GREP_HOME",
+  "ZVEC_GREP_INDEX_HOME",
   "ZVEC_GREP_MODE",
   "ZVEC_GREP_EMBEDDING",
   "ZVEC_GREP_API_KEY",
@@ -210,9 +213,6 @@ File selection:
   -L, --follow                      Follow symbolic links safely
   --reset-paths                     Clear inherited file-selection settings
 
-New indexes use --embedding, ZVEC_GREP_EMBEDDING, a configured default, or the
-built-in local default in that order. Existing indexes reuse their schema.
-
 Environment:
 ${formatEnvironmentVariables([
   "ZVEC_GREP_MODE",
@@ -221,7 +221,11 @@ ${formatEnvironmentVariables([
   "ZVEC_GREP_ENDPOINT",
   "ZVEC_GREP_MODEL_CACHE",
   "ZVEC_GREP_DEVICE",
+  "ZVEC_GREP_INDEX_HOME",
 ])}
+
+New indexes use --embedding, ZVEC_GREP_EMBEDDING, a configured default, or the
+built-in local default in that order. Existing indexes reuse their schema.
 
 See zg --help environment for precedence and Server-mode scope.`;
     case "status":
@@ -251,7 +255,10 @@ Remote models support --endpoint; local models support --device. At least one
 model option is required. --default may be used alone or with a runtime option.
 Existing indexes continue to use their stored model.
 
-Global configuration is stored in ~/.zvec-grep/config.json.`;
+Global configuration is stored in ~/.zvec-grep/config.json.
+defaults.indexHome selects workspace index storage: "project" keeps indexes
+in <workspace>/.zvec-grep; any other path stores all indexes under that
+directory. ZVEC_GREP_INDEX_HOME overrides it.`;
     case "auth":
       return `Usage:
   zg --auth grant [root] --capability embedding --scope workspace [--embedding <model>]
@@ -556,6 +563,7 @@ ${formatEnvironmentVariables(["DASHSCOPE_API_KEY", "QWEN_API_KEY"])}
 State and authorization:
 ${formatEnvironmentVariables([
   "ZVEC_GREP_HOME",
+  "ZVEC_GREP_INDEX_HOME",
   "ZVEC_GREP_AUTHORIZATION_KEY_FILE",
 ])}
 
@@ -582,6 +590,7 @@ Precedence:
   Embedding runtime                 CLI > Workspace snapshot > Global config > Environment
   New-index model                  --embedding > ZVEC_GREP_EMBEDDING > Global config > Built-in local
   Client mode                      --mode > ZVEC_GREP_MODE > Global config
+  Index home                       ZVEC_GREP_INDEX_HOME > Global config defaults.indexHome > <ZVEC_GREP_HOME>/workspaces
   Qwen environment credential      ZVEC_GREP_API_KEY > DASHSCOPE_API_KEY > QWEN_API_KEY
 
 Server scope:

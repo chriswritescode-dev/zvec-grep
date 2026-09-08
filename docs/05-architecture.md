@@ -29,7 +29,7 @@ flowchart LR
 
   Files[("Workspace files")] --> RG
   Files --> Indexing
-  Indexing --> Index[("Workspace index<br/>.zvec-grep/")]
+  Indexing --> Index[("Workspace index<br/>~/.zvec-grep/workspaces/")]
   Index --> Indexed
 
   Indexed --> Results["Compact results"]
@@ -70,10 +70,14 @@ and route selection in detail.
 
 ## State and trust boundary
 
-The normal repository index lives under `<workspace>/.zvec-grep/`. Global
-configuration and daemon state live under `~/.zvec-grep/`. Workspace scanning,
-managed ripgrep, index storage, and local Embedding models remain on the local
-machine, and the Server listens on loopback only.
+Workspace indexes live under `<ZVEC_GREP_HOME>/workspaces/<key>/` by default,
+keyed by a hash of the resolved workspace path, so no index data is written
+inside the project. Set `ZVEC_GREP_INDEX_HOME=project` (or
+`defaults.indexHome` in the global config) to store an index under
+`<workspace>/.zvec-grep/` instead. Global configuration and daemon state live
+under `~/.zvec-grep/`. Workspace scanning, managed ripgrep, index storage, and
+local Embedding models remain on the local machine, and the Server listens on
+loopback only.
 
 Selecting a remote Embedding provider is the one path that can send query text
 or workspace content outside the machine. zg requests explicit once-only or

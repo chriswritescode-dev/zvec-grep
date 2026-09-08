@@ -193,6 +193,14 @@ zg --config model set local/potion-code-16m-v2 --device metal
 Global configuration is stored in `~/.zvec-grep/config.json`. Existing indexes
 continue to use their stored model until explicitly rebuilt.
 
+Workspace index storage defaults to `<ZVEC_GREP_HOME>/workspaces/<key>/`,
+keyed by a hash of the resolved workspace path, so projects stay clean.
+`ZVEC_GREP_INDEX_HOME` (or `defaults.indexHome` in the global config) overrides
+it: set it to `project` to store indexes in `<workspace>/.zvec-grep/`, or to a
+directory path to store all indexes under that directory. Existing indexes
+built before this change are not discovered after the default changes; rebuild
+them with `zg --index --rebuild`.
+
 ## `zg --auth`
 
 ```text

@@ -7,6 +7,7 @@ import { acquireReadWriteLock } from "./utils/lock.js";
 export type ZvecGrepGlobalDefaults = {
   embedding?: string;
   modelCacheDir?: string;
+  indexHome?: string;
 };
 
 export type ZvecGrepProviderConfig = {
@@ -323,7 +324,12 @@ function parseDefaults(
   if (!isRecord(value)) {
     throw invalidConfig(path, "defaults must be an object");
   }
-  assertKnownFields(value, ["embedding", "modelCacheDir"], path, "defaults");
+  assertKnownFields(
+    value,
+    ["embedding", "modelCacheDir", "indexHome"],
+    path,
+    "defaults",
+  );
 
   const embedding = optionalNonEmptyString(
     value.embedding,
@@ -335,9 +341,15 @@ function parseDefaults(
     path,
     "defaults.modelCacheDir",
   );
+  const indexHome = optionalNonEmptyString(
+    value.indexHome,
+    path,
+    "defaults.indexHome",
+  );
   const defaults: ZvecGrepGlobalDefaults = {
     ...(embedding ? { embedding } : {}),
     ...(modelCacheDir ? { modelCacheDir } : {}),
+    ...(indexHome ? { indexHome } : {}),
   };
   return Object.keys(defaults).length > 0 ? defaults : undefined;
 }

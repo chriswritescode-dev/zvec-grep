@@ -50,7 +50,6 @@ import {
   hasWorkspaceIndex,
   resetWorkspaceIndex,
   resolveZvecGrepRoot,
-  workspaceHome,
   workspaceIndexLocation,
   type WorkspaceIndexLocation,
 } from "./root.js";
@@ -1064,7 +1063,7 @@ function assertNearestWorkspaceHomeUnlocked(
   let current = resolve(start);
 
   while (true) {
-    assertHomeUnlocked(workspaceHome(current), operation);
+    assertHomeUnlocked(workspaceIndexLocation(current).home, operation);
 
     const parent = dirname(current);
     if (parent === current) {
