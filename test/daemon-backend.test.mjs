@@ -5,11 +5,15 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { useTemporaryFileHome } from "./helpers/fixtures.mjs";
+
 import { DaemonBackend } from "../dist/daemon/backend.js";
 import { inspectRoot } from "../dist/daemon/runtime-manager.js";
 import { WatchManager } from "../dist/daemon/watch-manager.js";
 import { BaseEmbeddingModel } from "../dist/engine/models/embeddings.js";
 import { createZvecGrep } from "../dist/index.js";
+
+await useTemporaryFileHome();
 
 const noopWatchManagerFactory = () => ({
   start() {},

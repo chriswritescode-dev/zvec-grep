@@ -45,14 +45,15 @@ test("workspace index locations default to the central workspaces home", async (
   const temporaryRoot = await mkdtemp(join(tmpdir(), "zvec-grep-root-"));
 
   try {
+    const canonicalRoot = realpathSync(temporaryRoot);
     const location = workspaceIndexLocationFor(temporaryRoot, {
       kind: "central",
       centralRoot: temporaryHome,
     });
-    assert.equal(location.root, realpathSync(temporaryRoot));
+    assert.equal(location.root, canonicalRoot);
     assert.equal(
       location.home,
-      join(temporaryHome, workspaceKey(temporaryRoot)),
+      join(temporaryHome, workspaceKey(canonicalRoot)),
     );
     assert.equal(location.manifestPath, join(location.home, "manifest.json"));
     assert.equal(location.indexPath, join(location.home, "index.zvec"));

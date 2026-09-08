@@ -12,7 +12,7 @@ import {
 import { syncBuiltinESMExports } from "node:module";
 import { hostname } from "node:os";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { RootLeaseManager } from "../dist/daemon/root-lease.js";
 import {
@@ -22,8 +22,10 @@ import {
 } from "../dist/engine/utils/daemon-lease.js";
 import { createZvecGrep } from "../dist/index.js";
 import { printError } from "../dist/cli/errors.js";
+import { useTemporaryHome } from "./helpers/fixtures.mjs";
 
-test("daemon root lease blocks Direct index writes and is removed on release", async () => {
+test("daemon root lease blocks Direct index writes and is removed on release", async (t) => {
+  await useTemporaryHome(t);
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "zvec-grep-lease-"));
   const root = join(temporaryDirectory, "repo");
   await mkdir(root);
@@ -66,12 +68,13 @@ test("daemon root lease blocks Direct index writes and is removed on release", a
   }
 });
 
-test("concurrent stale lease takeover leaves exactly one new owner", async () => {
+test("concurrent stale lease takeover leaves exactly one new owner", async (t) => {
+  await useTemporaryHome(t);
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), "zvec-grep-stale-lease-"),
   );
   const root = join(temporaryDirectory, "repo");
-  await mkdir(join(root, ".zvec-grep", "locks"), { recursive: true });
+  await mkdir(dirname(daemonLeasePath(root)), { recursive: true });
   await writeFile(
     daemonLeasePath(root),
     `${JSON.stringify({
@@ -110,12 +113,13 @@ test("concurrent stale lease takeover leaves exactly one new owner", async () =>
   }
 });
 
-test("an abandoned malformed lease can be replaced safely", async () => {
+test("an abandoned malformed lease can be replaced safely", async (t) => {
+  await useTemporaryHome(t);
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), "zvec-grep-malformed-lease-"),
   );
   const root = join(temporaryDirectory, "repo");
-  await mkdir(join(root, ".zvec-grep", "locks"), { recursive: true });
+  await mkdir(dirname(daemonLeasePath(root)), { recursive: true });
   const path = daemonLeasePath(root);
   await writeFile(path, '{"pid":');
   const old = new Date(Date.now() - 60_000);
@@ -138,7 +142,8 @@ test("an abandoned malformed lease can be replaced safely", async () => {
   }
 });
 
-test("a Direct write permit prevents daemon activation until the write completes", async () => {
+test("a Direct write permit prevents daemon activation until the write completes", async (t) => {
+  await useTemporaryHome(t);
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), "zvec-grep-direct-permit-"),
   );
@@ -163,6 +168,7 @@ test("a Direct write permit prevents daemon activation until the write completes
 });
 
 test("lease heartbeats never expose a truncated record", async (t) => {
+  await useTemporaryHome(t);
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), "zvec-grep-lease-heartbeat-"),
   );
@@ -214,6 +220,7 @@ test("lease heartbeats never expose a truncated record", async (t) => {
 
 for (const action of ["release", "close"]) {
   test(`lease ${action} waits for a slow heartbeat across subsequent ticks`, async (t) => {
+    await useTemporaryHome(t);
     const root = await mkdtemp(join(tmpdir(), "zvec-grep-lease-overlap-"));
     let heartbeat;
     t.mock.method(globalThis, "setInterval", (callback) => {

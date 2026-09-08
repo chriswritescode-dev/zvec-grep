@@ -11,6 +11,8 @@ import { tmpdir } from "node:os";
 import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 import test from "node:test";
+import { useTemporaryFileHome } from "./helpers/fixtures.mjs";
+
 import {
   Client,
   StreamableHTTPClientTransport,
@@ -20,6 +22,8 @@ import { DaemonHttpServer } from "../dist/daemon/http-server.js";
 import { BaseEmbeddingModel } from "../dist/engine/models/embeddings.js";
 import { createZvecGrep } from "../dist/index.js";
 import { DaemonClient } from "../dist/client/daemon-client.js";
+
+await useTemporaryFileHome();
 
 const token = "server-http-test-token-at-least-32-characters";
 

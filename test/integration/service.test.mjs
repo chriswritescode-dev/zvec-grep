@@ -1,15 +1,21 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { EngineError } from "../../dist/engine/errors.js";
 import { resolveModelArtifacts } from "../../dist/engine/models/artifact-downloader.js";
 import { Model2VecEmbeddingModel } from "../../dist/engine/models/backends/model2vec.js";
 import { CURRENT_INDEX_VERSION } from "../../dist/engine/types.js";
 import { createZvecGrep } from "../../dist/index.js";
-import { createTemporaryDirectory } from "../helpers/fixtures.mjs";
+import { workspaceIndexLocation } from "../../dist/engine/service/root.js";
+import {
+  createTemporaryDirectory,
+  useTemporaryFileHome,
+} from "../helpers/fixtures.mjs";
 import { FakeEmbeddingModel } from "../helpers/fake-embedding.mjs";
+
+await useTemporaryFileHome();
 
 class SelectivelyFailingEmbeddingModel extends FakeEmbeddingModel {
   constructor() {
@@ -901,8 +907,8 @@ test("workspace rebuild recreates unsupported index metadata", async (t) => {
     "zvec-grep-version-rebuild-",
   );
   const root = join(temporaryDirectory, "repo");
-  const workspaceHome = join(root, ".zvec-grep");
   await mkdir(root, { recursive: true });
+  const workspaceHome = workspaceIndexLocation(root).home;
   await writeFile(join(root, "legacy.ts"), "export const LegacyNeedle = 42;\n");
 
   let service = await createZvecGrep({
@@ -924,9 +930,10 @@ test("workspace rebuild recreates unsupported index metadata", async (t) => {
 
   const filesMarker = join(workspaceHome, "files.zvec", "legacy-marker");
   const indexMarker = join(workspaceHome, "index.zvec", "legacy-marker");
-  const authorizationPath = join(workspaceHome, "authorization.json");
+  const authorizationPath = join(root, ".zvec-grep", "authorization.json");
   await writeFile(filesMarker, "legacy");
   await writeFile(indexMarker, "legacy");
+  await mkdir(dirname(authorizationPath), { recursive: true });
   await writeFile(authorizationPath, "preserve");
 
   service = await createZvecGrep({

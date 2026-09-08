@@ -5,8 +5,12 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
+import { useTemporaryFileHome } from "./helpers/fixtures.mjs";
+
 import { BaseEmbeddingModel } from "../dist/engine/models/embeddings.js";
 import { createZvecGrep } from "../dist/index.js";
+
+await useTemporaryFileHome();
 
 const execFileAsync = promisify(execFile);
 const cliPath = resolve("dist/cli/index.js");

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { readWorkspaceManifest } from "../dist/engine/manifest.js";
 import { updateGlobalConfig } from "../dist/engine/config.js";
+import { workspaceIndexLocation } from "../dist/engine/service/root.js";
 import { createZvecGrep } from "../dist/index.js";
 import {
   createRemoteEmbeddingOperationPermit,
@@ -12,12 +13,14 @@ import {
   withRemoteEmbeddingOperationPermit,
 } from "../dist/authorization/index.js";
 import { createFakeEmbeddingServer } from "./helpers/fake-embedding.mjs";
+import { useTemporaryHome } from "./helpers/fixtures.mjs";
 
 test("workspace runtime persists explicit key and endpoint but search overrides stay one-shot", async (t) => {
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), "zvec-grep-workspace-runtime-"),
   );
   const root = join(temporaryDirectory, "repo");
+  await useTemporaryHome(t);
   const endpoint = await createFakeEmbeddingServer(t);
   const replacementEndpoint = await createFakeEmbeddingServer(t);
   t.after(async () => {
@@ -126,7 +129,8 @@ test("inherited provider keys are not copied into workspace metadata", async (t)
 });
 
 function readRuntime(root) {
-  return readWorkspaceManifest(join(root, ".zvec-grep")).embeddingRuntime;
+  return readWorkspaceManifest(workspaceIndexLocation(root).home)
+    ?.embeddingRuntime;
 }
 
 async function withPermit(root, endpoint, operation) {

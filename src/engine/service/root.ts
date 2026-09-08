@@ -23,8 +23,7 @@ export type WorkspaceIndexLocation = {
 };
 
 export type IndexHomeMode =
-  | { kind: "project" }
-  | { kind: "central"; centralRoot: string };
+  { kind: "project" } | { kind: "central"; centralRoot: string };
 
 export function resolveZvecGrepRoot(root: string | undefined): string {
   return resolve(root ?? process.cwd());
@@ -152,7 +151,9 @@ function realpathIfExists(path: string): string {
   return existsSync(path) ? realpathSync(path) : path;
 }
 
-function nonEmptyEnvironmentValue(value: string | undefined): string | undefined {
+function nonEmptyEnvironmentValue(
+  value: string | undefined,
+): string | undefined {
   const normalized = value?.trim();
   return normalized ? normalized : undefined;
 }

@@ -10,6 +10,8 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
+import { useTemporaryFileHome } from "./helpers/fixtures.mjs";
+
 import { BaseEmbeddingModel } from "../dist/engine/models/embeddings.js";
 import {
   pathCanAffectIndex,
@@ -17,6 +19,8 @@ import {
   scanFilePath,
 } from "../dist/engine/pipeline/indexing/scanner/index.js";
 import { createZvecGrep } from "../dist/index.js";
+
+await useTemporaryFileHome();
 
 test("path scanners rebuild gitignore rules and stay inside the requested subtree", async () => {
   const temporaryDirectory = await mkdtemp(
