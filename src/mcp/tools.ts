@@ -264,7 +264,7 @@ export const ZVEC_GREP_AGENT_MCP_INSTRUCTIONS = formatPromptRules(
     "Every workspace operation requires an absolute root path visible to the daemon.",
     "Read freshness and background_refresh directly from zvec_grep_search responses without a status preflight.",
     "When results are served_from_current_index, use them immediately when they are sufficient; do not perform extra diagnostics merely because a background refresh is active.",
-    "When an index is missing and literal or regex search can answer the task, use native Grep or rg. Creating or rebuilding a persistent index requires explicit user authorization.",
+    "When an index is missing, an indexed search starts a background index build automatically and returns a retryable INDEX_BUILDING response; retry the search after it completes, or use native Grep or rg for an immediate exact-search result. Explicit index operations, including rebuilding an existing index and dropping an index, still require explicit user authorization; set autoUpdate to false to opt out of automatic initialization.",
   ],
 );
 
@@ -275,9 +275,9 @@ export const ZVEC_GREP_FULL_MCP_INSTRUCTIONS = formatPromptRules(
     ...ZVEC_GREP_FULL_SEARCH_MCP_INSTRUCTIONS,
     "Every workspace operation requires an absolute root path visible to the daemon.",
     "Use the zvec_grep_* tools directly for workspace search, status, indexing, deletion, and exhaustive lexical search.",
-    "Use freshness and background_refresh from zvec_grep_search without a status preflight; call zvec_grep_index_status only for a missing index, failed or cancelled indexing, diagnostics, or explicit progress monitoring.",
+    "Use freshness and background_refresh from zvec_grep_search without a status preflight; call zvec_grep_index_status only for an INDEX_BUILDING or missing index response, failed or cancelled indexing, diagnostics, or explicit progress monitoring.",
     "When results are served_from_current_index, use them immediately when they are sufficient; do not call status merely because a background refresh is active.",
-    "Call zvec_grep_index only when persistent indexing or index deletion is explicitly requested. Never silently create, rebuild, or drop an index.",
+    "Explicit index operations, including rebuilding an existing index and dropping an index, require an explicit user request. A search may auto-initialize a missing index unless it is disabled or autoUpdate is false; it returns a retryable INDEX_BUILDING response, so retry after it completes or fall back to zvec_grep_rg. Remote Embedding consent still applies before any remote index build.",
     "For a new index, use a user-selected embedding or omit it only when a server default model is known; never guess a model.",
     "zvec_grep_index wait defaults to false; poll zvec_grep_index_status for background progress and set wait to true only when completion is required before continuing.",
     "Use zvec_grep_index with drop: true, or zvec_grep_index_drop, only when index deletion is explicitly requested.",

@@ -327,7 +327,7 @@ test("Streamable HTTP serves health, MCP contracts and a real cached index searc
   await mkdir(unindexedRoot);
   const missing = await clients[0].callTool({
     name: "zvec_grep_search",
-    arguments: { root: unindexedRoot, query: "query" },
+    arguments: { root: unindexedRoot, query: "query", autoUpdate: false },
   });
   assert.equal(missing.isError, true);
   assert.match(missing.content[0].text, /INDEX_MISSING/);
@@ -388,7 +388,11 @@ test("Streamable HTTP serves health, MCP contracts and a real cached index searc
   const writerSearchPromise = clients[0]
     .callTool({
       name: "zvec_grep_search",
-      arguments: { root: unindexedRoot, fts: "newlyIndexed" },
+      arguments: {
+        root: unindexedRoot,
+        fts: "newlyIndexed",
+        autoUpdate: false,
+      },
     })
     .then((result) => {
       searchSettled = true;

@@ -489,7 +489,7 @@ test("Codex installer refreshes legacy managed guidance", async (t) => {
   }
   assert.match(
     agents,
-    /If the index is missing but exact or regex lookup can answer the task, use `zvec_grep_rg` when it is listed by the current host; otherwise native Grep or `rg`/,
+    /When the index is missing, `zvec_grep_search` starts a background index build automatically and returns a retryable `INDEX_BUILDING` response/,
   );
   assert.match(
     agents,
@@ -511,7 +511,10 @@ test("Codex installer refreshes legacy managed guidance", async (t) => {
   );
   assert.doesNotMatch(agents, /"fuse": true/);
   assert.match(agents, /Treat a sufficient snippet as already-read evidence/);
-  assert.match(agents, /Creating, rebuilding, or dropping a persistent index/);
+  assert.match(
+    agents,
+    /Explicit index operations, including rebuilding an existing index and dropping an index, require an explicit user request or authorization/,
+  );
   assert.doesNotMatch(agents, /managed-rg/);
   assert.doesNotMatch(agents, /solely to locate code/);
   assert.doesNotMatch(agents, /indexed search first/);

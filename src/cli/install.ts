@@ -2278,8 +2278,8 @@ ${formatPromptRules("### Freshness and index lifecycle", [
   "Pass a daemon-visible absolute `root` on every zvec-grep workspace call.",
   "Read `freshness` and `background_refresh` from search results without a status preflight.",
   "When results are `served_from_current_index`, use them when sufficient instead of waiting for the background refresh.",
-  `If the index is missing but exact or regex lookup can answer the task, use ${exactLookupRoute}.`,
-  "Creating, rebuilding, or dropping a persistent index requires an explicit user request or authorization; never do so silently.",
+  `When the index is missing, \`${searchTool}\` starts a background index build automatically and returns a retryable \`INDEX_BUILDING\` response; retry after it completes, or use ${exactLookupRoute} for an immediate result.`,
+  "Explicit index operations, including rebuilding an existing index and dropping an index, require an explicit user request or authorization; never do so silently. Set `autoUpdate` to `false` to opt out of automatic initialization; Remote Embedding consent still applies.",
 ])}
 ${qoderAuthorizationRecovery}
 ${ZVEC_GREP_AGENTS_END}`;

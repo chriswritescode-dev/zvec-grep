@@ -119,6 +119,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
   >();
   private readonly watchers = new Map<string, WatchManager>();
   private readonly indexCoordinators = new Map<string, IndexCoordinator>();
+  private readonly automaticIndexJobs = new Map<string, string>();
   private readonly droppingRoots = new Set<string>();
   private readonly authorizationManager: RemoteEmbeddingAuthorizationManager;
   private shuttingDown = false;
@@ -145,6 +146,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
         this.statusCache.delete(root);
         this.lastScanDiagnostics.delete(root);
         this.workspaceRuntimeCache.delete(root);
+        this.automaticIndexJobs.delete(root);
         await this.closeWatcher(root);
       },
     });
@@ -262,7 +264,14 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       }
     }
     const schema = info.workspaceIndex?.embedding;
-    if (!info.indexed || !schema || schema.provider !== "qwen") {
+    if (!info.indexed || !schema) {
+      return await this.planAutomaticIndexAuthorization(
+        input,
+        info,
+        canonicalRoot,
+      );
+    }
+    if (schema.provider !== "qwen") {
       return undefined;
     }
     const modelLoadRequest = this.searchModelLoadRequest(info, input);
@@ -276,6 +285,28 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
           .getByCanonicalRoot(canonicalRoot)
           ?.needsReconciliation() ?? false,
       store: this.authorizationManager.store,
+    });
+  }
+
+  private async planAutomaticIndexAuthorization(
+    input: NormalizedSearchInput,
+    info: ZvecGrepInfoResult,
+    canonicalRoot: string,
+  ): Promise<RemoteEmbeddingAuthorizationPlan | undefined> {
+    if (input.autoUpdate === false || info.indexPolicy === "disabled") {
+      return undefined;
+    }
+    if (this.scheduler.getByRoot(canonicalRoot)) {
+      return undefined;
+    }
+    const model = this.indexModel(info, {});
+    if (model.provider !== "qwen") {
+      return undefined;
+    }
+    return await this.planIndexAuthorization({
+      root: canonicalRoot,
+      apiKey: input.apiKey,
+      device: input.device,
     });
   }
 
@@ -293,7 +324,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
   }
 
   async index(
-    input: ZvecGrepIndexRequest,
+    input: DaemonIndexInput,
     options: {
       authorization?: RemoteEmbeddingOperationPermit;
       onProgress?: (progress: IndexProgress) => void;
@@ -421,6 +452,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       this.statusCache.delete(canonicalRoot);
       this.lastScanDiagnostics.delete(canonicalRoot);
       this.workspaceRuntimeCache.delete(canonicalRoot);
+      this.automaticIndexJobs.delete(canonicalRoot);
       try {
         await this.runtimeManager.evict(canonicalRoot);
       } finally {
@@ -436,10 +468,40 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     const startedAt = Date.now();
     const requestedRoot = await resolveRequestedRoot(input.root, false);
     this.assertRootNotDropping(requestedRoot);
-    const runtime = await this.runtimeManager.activate(requestedRoot);
+    let runtime: RootRuntime;
+    try {
+      runtime = await this.runtimeManager.activate(requestedRoot);
+    } catch (error) {
+      if (
+        input.autoUpdate !== false &&
+        error instanceof DaemonError &&
+        error.code === "INDEX_MISSING" &&
+        (await this.autoInitializeMissingIndex(
+          requestedRoot,
+          input,
+          options.authorization,
+        ))
+      ) {
+        runtime = await this.runtimeManager.activate(requestedRoot);
+      } else {
+        throw error;
+      }
+    }
     const releaseRuntimeActivity = runtime.beginActivity();
     try {
-      const searchInfo = await this.inspectRootWithCache(runtime.canonicalRoot);
+      let searchInfo = await this.inspectRootWithCache(runtime.canonicalRoot);
+      if (!searchInfo.indexed) {
+        const ready = await this.handleUnindexedSearch(
+          runtime,
+          searchInfo,
+          input,
+          options.authorization,
+        );
+        if (ready) {
+          this.statusCache.delete(runtime.canonicalRoot);
+          searchInfo = await this.inspectRootWithCache(runtime.canonicalRoot);
+        }
+      }
       const currentModelLoadRequest = runtime.currentModelLoadRequest();
       const defaultModelLoadRequest = searchInfo.indexed
         ? this.searchModelLoadRequest(searchInfo, {})
@@ -588,6 +650,121 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     }
   }
 
+  private async autoInitializeMissingIndex(
+    requestedRoot: string,
+    input: NormalizedSearchInput,
+    authorization?: RemoteEmbeddingOperationPermit,
+  ): Promise<boolean> {
+    const canonicalRoot = await resolveRequestedRoot(requestedRoot, true);
+    this.assertRootNotDropping(canonicalRoot);
+    const info = await this.inspectRoot(canonicalRoot, false);
+    return await this.autoInitializeSearchIndex(
+      canonicalRoot,
+      info,
+      input,
+      authorization,
+    );
+  }
+
+  private async handleUnindexedSearch(
+    runtime: RootRuntime,
+    info: ZvecGrepInfoResult,
+    input: NormalizedSearchInput,
+    authorization?: RemoteEmbeddingOperationPermit,
+  ): Promise<boolean> {
+    const canonicalRoot = runtime.canonicalRoot;
+    const automaticJobId = this.automaticIndexJobs.get(canonicalRoot);
+    if (automaticJobId) {
+      const job = this.scheduler.get(automaticJobId);
+      if (job?.state === "queued" || job?.state === "running") {
+        if (input.autoUpdate === false) {
+          throw indexMissingError(canonicalRoot);
+        }
+        throw indexBuildingError(canonicalRoot, job.id, job.state);
+      }
+      this.automaticIndexJobs.delete(canonicalRoot);
+    }
+    if (runtime.snapshot().writerPending) {
+      return false;
+    }
+    if (input.autoUpdate === false) {
+      throw indexMissingError(canonicalRoot);
+    }
+    return await this.autoInitializeSearchIndex(
+      canonicalRoot,
+      info,
+      input,
+      authorization,
+    );
+  }
+
+  private async autoInitializeSearchIndex(
+    canonicalRoot: string,
+    info: ZvecGrepInfoResult,
+    input: NormalizedSearchInput,
+    authorization?: RemoteEmbeddingOperationPermit,
+  ): Promise<boolean> {
+    if (info.indexed) {
+      return true;
+    }
+    if (info.indexPolicy === "disabled") {
+      throw indexDisabledError(canonicalRoot);
+    }
+    const latestJob = this.scheduler.getByRoot(canonicalRoot);
+    if (latestJob) {
+      if (latestJob.state === "queued" || latestJob.state === "running") {
+        throw indexBuildingError(canonicalRoot, latestJob.id, latestJob.state);
+      }
+      if (latestJob.state === "succeeded") {
+        if (this.automaticIndexJobs.get(canonicalRoot) === latestJob.id) {
+          this.automaticIndexJobs.delete(canonicalRoot);
+        }
+        if ((await this.inspectRoot(canonicalRoot, false)).indexed) {
+          return true;
+        }
+      }
+      throw indexMissingAfterJob(canonicalRoot, latestJob);
+    }
+    const refreshed = await this.inspectRoot(canonicalRoot, false);
+    if (refreshed.indexed) {
+      return true;
+    }
+    if (refreshed.indexPolicy === "disabled") {
+      throw indexDisabledError(canonicalRoot);
+    }
+    const model = this.indexModel(refreshed, {});
+    if (model.provider === "qwen" && !authorization) {
+      throw new DaemonError(
+        "REMOTE_EMBEDDING_AUTH_REQUIRED",
+        "A Workspace Remote Embedding grant is required before an automatic background index build can send workspace content to a remote embedding provider.",
+      );
+    }
+    const submitted = await this.index(
+      {
+        root: canonicalRoot,
+        wait: false,
+        apiKey: input.apiKey,
+        device: input.device,
+        runtimeOverridesAreEphemeral: true,
+      },
+      { authorization },
+    );
+    this.trackAutomaticIndexJob(canonicalRoot, submitted.jobId);
+    throw indexBuildingError(canonicalRoot, submitted.jobId, submitted.state);
+  }
+
+  private trackAutomaticIndexJob(canonicalRoot: string, jobId: string): void {
+    this.automaticIndexJobs.set(canonicalRoot, jobId);
+    void this.scheduler
+      .wait(jobId)
+      .then(() => {
+        if (this.automaticIndexJobs.get(canonicalRoot) === jobId) {
+          this.automaticIndexJobs.delete(canonicalRoot);
+        }
+      })
+      .catch(() => undefined);
+  }
+
   private currentIndexCompletion(
     canonicalRoot: string,
     job: IndexJobSnapshot | undefined,
@@ -720,6 +897,7 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
       await this.modelPool.close();
       this.lastScanDiagnostics.clear();
       this.workspaceRuntimeCache.clear();
+      this.automaticIndexJobs.clear();
     })();
     return this.closePromise;
   }
@@ -1495,6 +1673,45 @@ function formatProgress(
     files_failed: progress.filesFailed,
     detail: progress.detail,
   };
+}
+
+function indexBuildingError(
+  canonicalRoot: string,
+  jobId: string,
+  state: string,
+): DaemonError {
+  return new DaemonError(
+    "INDEX_BUILDING",
+    `A workspace index build for ${canonicalRoot} is in progress (job ${jobId}, state ${state}). Retry this search after indexing completes, or use an available exact-search fallback (native Grep, rg, or zvec_grep_rg) for an immediate result.`,
+    true,
+  );
+}
+
+function indexMissingError(canonicalRoot: string): DaemonError {
+  return new DaemonError(
+    "INDEX_MISSING",
+    `Search requires an existing workspace index for ${canonicalRoot}. Use an available exact-search fallback when it is sufficient. Creating or rebuilding a persistent index requires explicit user authorization.`,
+  );
+}
+
+function indexDisabledError(canonicalRoot: string): DaemonError {
+  return new DaemonError(
+    "INDEX_MISSING",
+    `Search requires an existing workspace index for ${canonicalRoot}, but the workspace index is disabled. Use an available exact-search fallback when it is sufficient. Creating or rebuilding a persistent index requires explicit user authorization.`,
+  );
+}
+
+function indexMissingAfterJob(
+  canonicalRoot: string,
+  job: IndexJobSnapshot,
+): DaemonError {
+  const failure = job.error
+    ? ` (${job.error.code}: ${job.error.message}${job.error.context ? `; ${job.error.context}` : ""})`
+    : "";
+  return new DaemonError(
+    "INDEX_MISSING",
+    `Search requires an existing workspace index for ${canonicalRoot}. The last index job ${job.state}${failure}, so a new index was not built automatically; use an available exact-search fallback (native Grep, rg, or zvec_grep_rg) or request an explicit index build.`,
+  );
 }
 
 function searchIndexingSnapshot(

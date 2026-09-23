@@ -11,6 +11,8 @@ import { DaemonBackend } from "../dist/daemon/backend.js";
 import { inspectRoot } from "../dist/daemon/runtime-manager.js";
 import { WatchManager } from "../dist/daemon/watch-manager.js";
 import { BaseEmbeddingModel } from "../dist/engine/models/embeddings.js";
+import { readWorkspaceManifest } from "../dist/engine/manifest.js";
+import { workspaceIndexLocation } from "../dist/engine/service/root.js";
 import { createZvecGrep } from "../dist/index.js";
 
 await useTemporaryFileHome();
@@ -442,6 +444,338 @@ test("eventual search can skip background reconciliation", async () => {
       total: 1,
     });
     assert.equal(backend.scheduler.getByRoot(await realpath(root)), undefined);
+  } finally {
+    await backend.close();
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test("missing-index search starts one background build and returns retryable INDEX_BUILDING", async () => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-auto-init-"),
+  );
+  const root = join(temporaryDirectory, "repo");
+  await mkdir(root);
+  await writeFile(join(root, "answer.ts"), "export const answer = 42;\n");
+  let markEmbeddingStarted;
+  let releaseEmbedding = () => {};
+  const embeddingStarted = new Promise((resolve) => {
+    markEmbeddingStarted = resolve;
+  });
+  const embeddingReleased = new Promise((resolve) => {
+    releaseEmbedding = resolve;
+  });
+  const backend = new DaemonBackend({
+    version: "1.0.0",
+    modelPoolOptions: {
+      createModel: () =>
+        new TestEmbeddingModel(async () => {
+          markEmbeddingStarted();
+          await embeddingReleased;
+        }),
+    },
+    watchManagerFactory: noopWatchManagerFactory,
+  });
+  try {
+    const [first, duplicate] = await Promise.allSettled([
+      backend.search(searchInput(root, "answer", "eventual")),
+      backend.search(searchInput(root, "answer", "eventual")),
+    ]);
+    assert.equal(first.status, "rejected");
+    assert.equal(duplicate.status, "rejected");
+    assert.equal(first.reason.code, "INDEX_BUILDING");
+    assert.equal(duplicate.reason.code, "INDEX_BUILDING");
+    assert.equal(first.reason.retryable, true);
+    assert.match(first.reason.message, /job .*, state (queued|running)/);
+    assert.match(first.reason.message, /exact-search fallback/);
+
+    const canonicalRoot = await realpath(root);
+    const job = backend.scheduler.getByRoot(canonicalRoot);
+    assert.equal(job.state, "running");
+    assert.match(first.reason.message, new RegExp(job.id));
+    assert.match(duplicate.reason.message, new RegExp(job.id));
+
+    await assert.rejects(
+      backend.search(searchInput(root, "answer", "wait_for_fresh")),
+      (error) =>
+        error.code === "INDEX_BUILDING" && error.message.includes(job.id),
+    );
+
+    await assert.rejects(
+      backend.search({
+        ...searchInput(root, "answer", "eventual"),
+        autoUpdate: false,
+      }),
+      (error) => error.code === "INDEX_MISSING",
+    );
+    assert.equal(backend.scheduler.getByRoot(canonicalRoot).id, job.id);
+
+    await embeddingStarted;
+    releaseEmbedding();
+    await backend.scheduler.wait(job.id);
+    assert.equal(backend.scheduler.get(job.id).state, "succeeded");
+
+    const result = await backend.search(
+      searchInput(root, "answer", "wait_for_fresh"),
+    );
+    assert.equal(result.freshness, "fresh");
+    assert.match(result.result.items[0].content, /answer/);
+  } finally {
+    releaseEmbedding();
+    await backend.close();
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test("missing-index search does not auto-initialize when opted out or disabled", async () => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-auto-init-optout-"),
+  );
+  const root = join(temporaryDirectory, "repo");
+  await mkdir(root);
+  await writeFile(join(root, "answer.ts"), "export const answer = 42;\n");
+  const backend = new DaemonBackend({
+    version: "1.0.0",
+    modelPoolOptions: { createModel: () => new TestEmbeddingModel() },
+    watchManagerFactory: noopWatchManagerFactory,
+  });
+  try {
+    await assert.rejects(
+      backend.search({
+        ...searchInput(root, "answer", "eventual"),
+        autoUpdate: false,
+      }),
+      (error) => error.code === "INDEX_MISSING",
+    );
+    const canonicalRoot = await realpath(root);
+    assert.equal(backend.scheduler.getByRoot(canonicalRoot), undefined);
+
+    const service = await createZvecGrep({
+      root,
+      embeddingModel: new TestEmbeddingModel(),
+    });
+    await service.index();
+    await service.disableIndex();
+    await service.close();
+
+    await assert.rejects(
+      backend.search(searchInput(root, "answer", "eventual")),
+      (error) => error.code === "INDEX_MISSING",
+    );
+    assert.equal(backend.scheduler.getByRoot(canonicalRoot), undefined);
+  } finally {
+    await backend.close();
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test("failed automatic index build is not reported as building", async () => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-auto-init-failure-"),
+  );
+  const root = join(temporaryDirectory, "repo");
+  await mkdir(root);
+  await writeFile(join(root, "answer.ts"), "export const answer = 42;\n");
+  const backend = new DaemonBackend({
+    version: "1.0.0",
+    modelPoolOptions: {
+      createModel: () =>
+        new TestEmbeddingModel(async () => {
+          throw new Error("fixture embedding failure");
+        }),
+    },
+    watchManagerFactory: noopWatchManagerFactory,
+  });
+  try {
+    await assert.rejects(
+      backend.search(searchInput(root, "answer", "eventual")),
+      (error) => error.code === "INDEX_BUILDING",
+    );
+    const canonicalRoot = await realpath(root);
+    const job = backend.scheduler.getByRoot(canonicalRoot);
+    await backend.scheduler.wait(job.id);
+    assert.equal(backend.scheduler.get(job.id).state, "failed");
+
+    await assert.rejects(
+      backend.search(searchInput(root, "answer", "eventual")),
+      (error) => {
+        assert.equal(error.code, "INDEX_MISSING");
+        assert.doesNotMatch(error.message, /INDEX_BUILDING/);
+        assert.match(error.message, /fixture embedding failure/);
+        return true;
+      },
+    );
+    assert.equal(backend.scheduler.getByRoot(canonicalRoot).id, job.id);
+  } finally {
+    await backend.close();
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test("missing-index search requires remote authorization before automatic initialization", async () => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-auto-init-remote-"),
+  );
+  const root = join(temporaryDirectory, "repo");
+  await mkdir(root);
+  await writeFile(join(root, "answer.ts"), "export const answer = 42;\n");
+  const backend = new DaemonBackend({
+    version: "1.0.0",
+    serviceOptions: {
+      embedding: "qwen/text-embedding-v4",
+      apiKey: "qwen-test-key",
+      endpoint: "https://qwen.test/embeddings",
+    },
+    modelPoolOptions: { createModel: () => new QwenTestEmbeddingModel() },
+    watchManagerFactory: noopWatchManagerFactory,
+  });
+  try {
+    await assert.rejects(
+      backend.search(searchInput(root, "answer", "eventual")),
+      (error) => error.code === "REMOTE_EMBEDDING_AUTH_REQUIRED",
+    );
+    const canonicalRoot = await realpath(root);
+    assert.equal(backend.scheduler.getByRoot(canonicalRoot), undefined);
+
+    const plan = await backend.planSearchAuthorization(
+      searchInput(root, "answer", "eventual"),
+    );
+    assert.equal(plan.operation, "index");
+
+    const authorization = await backend.grantRemoteEmbedding(plan, "once");
+    await assert.rejects(
+      backend.search(searchInput(root, "answer", "eventual"), {
+        authorization,
+      }),
+      (error) => error.code === "INDEX_BUILDING",
+    );
+  } finally {
+    await backend.close();
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test("manual index writer context still serves an autoUpdate false search", async () => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-manual-writer-optout-"),
+  );
+  const root = join(temporaryDirectory, "repo");
+  await mkdir(root);
+  await writeFile(join(root, "answer.ts"), "export const answer = 42;\n");
+  let releaseEmbedding = () => {};
+  const embeddingReleased = new Promise((resolve) => {
+    releaseEmbedding = resolve;
+  });
+  let blockEmbedding = true;
+  const backend = new DaemonBackend({
+    version: "1.0.0",
+    modelPoolOptions: {
+      createModel: () =>
+        new TestEmbeddingModel(async () => {
+          if (blockEmbedding) {
+            await embeddingReleased;
+          }
+        }),
+    },
+    watchManagerFactory: noopWatchManagerFactory,
+  });
+  try {
+    const submitted = await backend.index({
+      root,
+      embedding: "test/deterministic",
+    });
+    const canonicalRoot = await realpath(root);
+    await waitFor(
+      () =>
+        backend.scheduler.get(submitted.jobId)?.progress?.detail ===
+        "embedding answer.ts",
+    );
+
+    const result = await backend.search({
+      ...searchInput(root, "answer", "eventual"),
+      queries: undefined,
+      routes: [{ mode: "fts", query: "answer" }],
+      autoUpdate: false,
+    });
+
+    assert.equal(result.freshness, "possibly_stale");
+    assert.equal(result.indexing.state, "running");
+    assert.equal(
+      backend.scheduler.getByRoot(canonicalRoot).id,
+      submitted.jobId,
+    );
+  } finally {
+    blockEmbedding = false;
+    releaseEmbedding();
+    await backend.close();
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test("automatic initialization threads ephemeral runtime overrides into planning and execution", async () => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-auto-init-overrides-"),
+  );
+  const root = join(temporaryDirectory, "repo");
+  await mkdir(root);
+  await writeFile(join(root, "answer.ts"), "export const answer = 42;\n");
+  const modelRequests = [];
+  const serviceOptions = [];
+  const backend = new DaemonBackend({
+    version: "1.0.0",
+    serviceOptions: {
+      embedding: "qwen/text-embedding-v4",
+      endpoint: "https://qwen.test/embeddings",
+    },
+    modelPoolOptions: {
+      idleTtlMs: 0,
+      createModel: (request) => {
+        modelRequests.push(request);
+        return new QwenTestEmbeddingModel();
+      },
+    },
+    createService: async (options) => {
+      serviceOptions.push(options);
+      return await createZvecGrep(options);
+    },
+    watchManagerFactory: noopWatchManagerFactory,
+  });
+  try {
+    const request = {
+      ...searchInput(root, "answer", "eventual"),
+      apiKey: "request-key",
+    };
+    const plan = await backend.planSearchAuthorization(request);
+    assert.equal(plan.operation, "index");
+
+    const authorization = await backend.grantRemoteEmbedding(plan, "once");
+    await assert.rejects(
+      backend.search(request, { authorization }),
+      (error) => error.code === "INDEX_BUILDING",
+    );
+
+    const canonicalRoot = await realpath(root);
+    const job = backend.scheduler.getByRoot(canonicalRoot);
+    await backend.scheduler.wait(job.id);
+    assert.equal(backend.scheduler.get(job.id).state, "succeeded");
+
+    const requestsWithOverride = modelRequests.filter(
+      (modelRequest) => modelRequest.runtime?.apiKey === "request-key",
+    );
+    assert.ok(requestsWithOverride.length >= 2);
+
+    const indexService = serviceOptions.find(
+      (options) => options.embeddingModel,
+    );
+    assert.ok(indexService);
+    assert.equal(indexService.apiKey, undefined);
+    assert.equal(indexService.endpoint, undefined);
+    assert.equal(indexService.device, undefined);
+
+    const manifest = readWorkspaceManifest(
+      workspaceIndexLocation(canonicalRoot).home,
+    );
+    assert.notEqual(manifest?.embeddingRuntime?.apiKey, "request-key");
   } finally {
     await backend.close();
     await rm(temporaryDirectory, { recursive: true, force: true });
