@@ -19,7 +19,10 @@ import {
 import {
   createEmbeddingModel,
   EmbeddingPurpose,
+  getEmbeddingModelCatalogEntry,
+  normalizeLocalEmbeddingConcurrency,
   resolveEmbeddingReference,
+  resolveIndexEmbeddingConcurrencyOverride,
   type CreateEmbeddingModelOptions,
   type EmbeddingModel,
   type EmbeddingModelInfo,
@@ -168,7 +171,13 @@ export function createEmbeddingModelForIdentity(
   const reference = embeddingModelReference(identity);
   return createServiceEmbeddingModel(
     reference,
-    providerOptions(options, identity, readGlobalConfig(), workspaceRuntime),
+    providerOptions(
+      options,
+      identity,
+      readGlobalConfig(),
+      workspaceRuntime,
+      options.embeddingConcurrency,
+    ),
     options,
   );
 }
@@ -180,7 +189,13 @@ export function embeddingModelPoolKeyForIdentity(
 ): string {
   const reference = embeddingModelReference(identity);
   const fingerprint = providerOptionsFingerprint(
-    providerOptions(options, identity, readGlobalConfig(), workspaceRuntime),
+    providerOptions(
+      options,
+      identity,
+      readGlobalConfig(),
+      workspaceRuntime,
+      options.embeddingConcurrency,
+    ),
   );
   return [reference, fingerprint].join("/");
 }
@@ -190,6 +205,12 @@ class ZvecGrepService implements ZvecGrep {
   private readonly embeddingModel?: EmbeddingModel;
   private readonly recoveredEmbeddingModels = new Map<string, EmbeddingModel>();
   private readonly retiredEmbeddingModels = new Set<EmbeddingModel>();
+  private readonly localEmbeddingVariants = new Map<
+    string,
+    { family: string; concurrency?: number }
+  >();
+  private modelSelectionPromise: Promise<void> = Promise.resolve();
+  private modelDisposalPromise: Promise<void> = Promise.resolve();
   private activeEmbeddingModelOperations = 0;
   private closed = false;
 
@@ -214,11 +235,13 @@ class ZvecGrepService implements ZvecGrep {
           async () => {
             const existing = readWorkspaceManifest(location.home);
             const existingRuntime = existing?.embeddingRuntime ?? {};
-            const embeddingModel = this.embeddingModelForIndex(
-              existing,
-              "index",
-              existingRuntime,
-            );
+            const { model: embeddingModel, concurrency: embeddingConcurrency } =
+              await this.embeddingModelForIndex(
+                existing,
+                "index",
+                existingRuntime,
+                options.embeddingConcurrency,
+              );
             const effectiveRuntime = effectiveEmbeddingRuntime(
               this.options,
               embeddingModel,
@@ -302,7 +325,7 @@ class ZvecGrepService implements ZvecGrep {
               try {
                 const result = await workspaceIndex.index({
                   rebuild: false,
-                  embeddingConcurrency: options.embeddingConcurrency,
+                  embeddingConcurrency,
                   onProgress: options.onProgress,
                   changedPaths: options.changedPaths,
                   signal: options.signal,
@@ -490,6 +513,9 @@ class ZvecGrepService implements ZvecGrep {
   }
 
   async close(): Promise<void> {
+    this.closed = true;
+    await this.modelSelectionPromise;
+    await this.modelDisposalPromise;
     const models = new Set<EmbeddingModel>([
       ...(this.embeddingModel &&
       this.options.embeddingModelOwnership !== "borrowed"
@@ -500,12 +526,9 @@ class ZvecGrepService implements ZvecGrep {
     ]);
     this.recoveredEmbeddingModels.clear();
     this.retiredEmbeddingModels.clear();
+    this.localEmbeddingVariants.clear();
 
-    for (const model of models) {
-      await model.dispose();
-    }
-
-    this.closed = true;
+    await disposeEmbeddingModels(models);
   }
 
   private async contextFromWorkspaceIndex(
@@ -521,7 +544,7 @@ class ZvecGrepService implements ZvecGrep {
       });
     }
 
-    const workspaceIndex = this.openWorkspaceIndexForSearch(
+    const workspaceIndex = await this.openWorkspaceIndexForSearch(
       info,
       request,
       info.embeddingRuntime,
@@ -579,11 +602,13 @@ class ZvecGrepService implements ZvecGrep {
           }
 
           const workspaceRuntime = existing.embeddingRuntime;
-          const embeddingModel = this.embeddingModelForIndex(
-            existing,
-            "context.refresh",
-            workspaceRuntime,
-          );
+          const { model: embeddingModel, concurrency: embeddingConcurrency } =
+            await this.embeddingModelForIndex(
+              existing,
+              "context.refresh",
+              workspaceRuntime,
+              options.embeddingConcurrency,
+            );
           assertWorkspaceEndpointMatchesCurrentRuntime(
             existing,
             workspaceRuntime,
@@ -606,7 +631,7 @@ class ZvecGrepService implements ZvecGrep {
           });
           try {
             const result = await workspaceIndex.index({
-              embeddingConcurrency: options.embeddingConcurrency,
+              embeddingConcurrency,
               onProgress: options.onAutoUpdateProgress,
             });
             timings.addEntries(result.timings, "auto_update_");
@@ -710,14 +735,14 @@ class ZvecGrepService implements ZvecGrep {
     };
   }
 
-  private openWorkspaceIndexForSearch(
+  private async openWorkspaceIndexForSearch(
     info: WorkspaceIndexInfo,
     request: NormalizedContextRequest,
     workspaceRuntime: EmbeddingRuntimeConfig,
-  ): WorkspaceIndex {
+  ): Promise<WorkspaceIndex> {
     return new WorkspaceIndex(info, {
       mode: "read",
-      embeddingModel: this.embeddingModelForSearch(
+      embeddingModel: await this.embeddingModelForSearch(
         indexedEmbeddingSchema(info),
         request,
         workspaceRuntime,
@@ -726,12 +751,12 @@ class ZvecGrepService implements ZvecGrep {
     });
   }
 
-  private embeddingModelForSearch(
+  private async embeddingModelForSearch(
     schema: WorkspaceIndexEmbeddingSchema,
     request: NormalizedContextRequest,
     workspaceRuntime: EmbeddingRuntimeConfig,
     info: WorkspaceIndexInfo,
-  ): EmbeddingModel | undefined {
+  ): Promise<EmbeddingModel | undefined> {
     if (!request.routes.some((route) => route.mode === "vector")) {
       return undefined;
     }
@@ -759,17 +784,32 @@ class ZvecGrepService implements ZvecGrep {
     return this.recoverEmbeddingModel(schema, workspaceRuntime);
   }
 
-  private embeddingModelForIndex(
+  private async embeddingModelForIndex(
     existing: WorkspaceIndexInfo | null,
     operation: string,
     workspaceRuntime: EmbeddingRuntimeConfig = {},
-  ): EmbeddingModel {
+    embeddingConcurrency?: number,
+  ): Promise<{ model: EmbeddingModel; concurrency?: number }> {
     if (
       isWorkspaceIndexed(existing) &&
       !this.embeddingModel &&
       !this.options.embedding
     ) {
-      return this.recoverEmbeddingModel(existing.embedding, workspaceRuntime);
+      const concurrency = resolveIndexEmbeddingConcurrency(
+        {
+          provider: existing.embedding.provider,
+          name: existing.embedding.model,
+        },
+        embeddingConcurrency ?? this.options.embeddingConcurrency,
+      );
+      return {
+        model: await this.recoverEmbeddingModel(
+          existing.embedding,
+          workspaceRuntime,
+          concurrency,
+        ),
+        concurrency,
+      };
     }
 
     const config = readGlobalConfig();
@@ -787,23 +827,37 @@ class ZvecGrepService implements ZvecGrep {
       existing.embedding.provider !== referenceIdentity.provider
         ? {}
         : workspaceRuntime;
-    return (
+    const identity = this.embeddingModel
+      ? {
+          provider: this.embeddingModel.info.provider,
+          name: this.embeddingModel.info.name,
+        }
+      : referenceIdentity;
+    const concurrency = identity
+      ? resolveIndexEmbeddingConcurrency(
+          identity,
+          embeddingConcurrency ?? this.options.embeddingConcurrency,
+        )
+      : undefined;
+    const model =
       this.embeddingModel ??
       (reference
-        ? this.embeddingModelFromReference(
+        ? await this.embeddingModelFromReference(
             reference,
             config,
             selectedWorkspaceRuntime,
+            concurrency,
           )
         : undefined) ??
-      this.requireEmbeddingModel(operation)
-    );
+      this.requireEmbeddingModel(operation);
+    return { model, concurrency };
   }
 
-  private recoverEmbeddingModel(
+  private async recoverEmbeddingModel(
     schema: WorkspaceIndexEmbeddingSchema,
     workspaceRuntime: EmbeddingRuntimeConfig = {},
-  ): EmbeddingModel {
+    embeddingConcurrency?: number,
+  ): Promise<EmbeddingModel> {
     const config = readGlobalConfig();
     const identity = {
       provider: schema.provider,
@@ -815,46 +869,101 @@ class ZvecGrepService implements ZvecGrep {
       identity,
       config,
       workspaceRuntime,
+      embeddingConcurrency,
     );
     const key = `${reference}/${providerOptionsFingerprint(options)}`;
-    return this.cachedEmbeddingModel(key, () =>
-      createServiceEmbeddingModel(reference, options, this.options),
+    return this.cachedEmbeddingModel(
+      key,
+      () => createServiceEmbeddingModel(reference, options, this.options),
+      localEmbeddingVariant(reference, options),
     );
   }
 
-  private embeddingModelFromReference(
+  private async embeddingModelFromReference(
     reference: string,
     config: ZvecGrepGlobalConfig = readGlobalConfig(),
     workspaceRuntime: EmbeddingRuntimeConfig = {},
-  ): EmbeddingModel {
+    embeddingConcurrency?: number,
+  ): Promise<EmbeddingModel> {
     const identity = parseEmbeddingModelReference(reference);
     const options = providerOptions(
       this.options,
       identity,
       config,
       workspaceRuntime,
+      embeddingConcurrency,
     );
     const key = `configured/${reference}/${providerOptionsFingerprint(options)}`;
-    return this.cachedEmbeddingModel(key, () =>
-      createServiceEmbeddingModel(reference, options, this.options),
+    return this.cachedEmbeddingModel(
+      key,
+      () => createServiceEmbeddingModel(reference, options, this.options),
+      localEmbeddingVariant(reference, options),
     );
   }
 
   private cachedEmbeddingModel(
     key: string,
     create: () => EmbeddingModel,
-  ): EmbeddingModel {
-    const cached = this.recoveredEmbeddingModels.get(key);
-    if (cached) {
-      this.recoveredEmbeddingModels.delete(key);
-      this.recoveredEmbeddingModels.set(key, cached);
-      return cached;
-    }
+    variant?: { family: string; concurrency?: number },
+  ): Promise<EmbeddingModel> {
+    // Serialize cache selection, not inference. A caller arriving during an
+    // idle model's disposal must wait before it can load another GPU model.
+    const selected = this.modelSelectionPromise.then(async () => {
+      this.ensureOpen();
+      if (variant && this.activeEmbeddingModelOperations <= 1) {
+        for (const [cachedKey, cachedVariant] of this.localEmbeddingVariants) {
+          if (
+            cachedVariant.family === variant.family &&
+            cachedVariant.concurrency !== variant.concurrency
+          ) {
+            this.retireEmbeddingModel(cachedKey);
+          }
+        }
+      }
+      if (this.activeEmbeddingModelOperations <= 1) {
+        // Only this operation remains, and its previous phase has finished.
+        // Other active operations may still hold retired models, so otherwise
+        // defer disposal until the final operation exits.
+        await this.disposeRetiredEmbeddingModels();
+      } else {
+        await this.modelDisposalPromise;
+      }
+      this.ensureOpen();
+      const equivalentKey = variant
+        ? [...this.localEmbeddingVariants].find(
+            ([, cachedVariant]) =>
+              cachedVariant.family === variant.family &&
+              cachedVariant.concurrency === variant.concurrency,
+          )?.[0]
+        : undefined;
+      const cachedKey = this.recoveredEmbeddingModels.has(key)
+        ? key
+        : (equivalentKey ?? key);
+      const cached = this.recoveredEmbeddingModels.get(cachedKey);
+      if (cached) {
+        this.recoveredEmbeddingModels.delete(cachedKey);
+        this.recoveredEmbeddingModels.set(cachedKey, cached);
+        return cached;
+      }
 
-    const model = create();
-    this.recoveredEmbeddingModels.set(key, model);
-    this.trimRecoveredEmbeddingModels();
-    return model;
+      const model = create();
+      this.recoveredEmbeddingModels.set(key, model);
+      if (variant) this.localEmbeddingVariants.set(key, variant);
+      this.trimRecoveredEmbeddingModels();
+      return model;
+    });
+    this.modelSelectionPromise = selected.then(
+      () => undefined,
+      () => undefined,
+    );
+    return selected;
+  }
+
+  private retireEmbeddingModel(key: string): void {
+    const model = this.recoveredEmbeddingModels.get(key);
+    this.recoveredEmbeddingModels.delete(key);
+    this.localEmbeddingVariants.delete(key);
+    if (model) this.retiredEmbeddingModels.add(model);
   }
 
   private trimRecoveredEmbeddingModels(): void {
@@ -866,10 +975,19 @@ class ZvecGrepService implements ZvecGrep {
         return;
       }
 
-      const model = this.recoveredEmbeddingModels.get(oldestKey);
-      this.recoveredEmbeddingModels.delete(oldestKey);
-      if (model) {
-        this.retiredEmbeddingModels.add(model);
+      this.retireEmbeddingModel(oldestKey);
+    }
+  }
+
+  private retireIdleEmbeddingVariants(): void {
+    const retainedFamilies = new Set<string>();
+    for (const key of [...this.recoveredEmbeddingModels.keys()].reverse()) {
+      const variant = this.localEmbeddingVariants.get(key);
+      if (!variant) continue;
+      if (retainedFamilies.has(variant.family)) {
+        this.retireEmbeddingModel(key);
+      } else {
+        retainedFamilies.add(variant.family);
       }
     }
   }
@@ -883,17 +1001,25 @@ class ZvecGrepService implements ZvecGrep {
     } finally {
       this.activeEmbeddingModelOperations -= 1;
       if (this.activeEmbeddingModelOperations === 0) {
+        this.retireIdleEmbeddingVariants();
         await this.disposeRetiredEmbeddingModels();
       }
     }
   }
 
-  private async disposeRetiredEmbeddingModels(): Promise<void> {
+  private disposeRetiredEmbeddingModels(): Promise<void> {
     const models = [...this.retiredEmbeddingModels];
     this.retiredEmbeddingModels.clear();
-    for (const model of models) {
-      await model.dispose();
-    }
+    const disposal = this.modelDisposalPromise.then(() =>
+      disposeEmbeddingModels(models),
+    );
+    // Report this batch's failures to its caller, but let later cleanup and
+    // model selection continue after every disposal in the batch settles.
+    this.modelDisposalPromise = disposal.then(
+      () => undefined,
+      () => undefined,
+    );
+    return disposal;
   }
 
   private requireEmbeddingModel(operation: string): EmbeddingModel {
@@ -923,6 +1049,23 @@ class ZvecGrepService implements ZvecGrep {
         code: "ZVEC_GREP.ENGINE.SERVICE.CLOSED",
       });
     }
+  }
+}
+
+async function disposeEmbeddingModels(
+  models: Iterable<EmbeddingModel>,
+): Promise<void> {
+  const errors: unknown[] = [];
+  for (const model of models) {
+    try {
+      await model.dispose();
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) {
+    throw new AggregateError(errors, "Failed to dispose embedding models");
   }
 }
 
@@ -1399,13 +1542,33 @@ function indexedEmbeddingSchema(
   });
 }
 
+/** Resolve index-stage batch concurrency; query model creation never reads it. */
+export function resolveIndexEmbeddingConcurrency(
+  identity: EmbeddingModelIdentity,
+  requested?: number,
+): number | undefined {
+  const backend = getEmbeddingModelCatalogEntry(
+    embeddingModelReference(identity),
+  )?.backend;
+  return resolveIndexEmbeddingConcurrencyOverride({
+    embeddingConcurrency: requested,
+    legacyLlama: backend === "llama-cpp",
+  });
+}
+
 function providerOptions(
   options: CreateZvecGrepOptions,
   identity: EmbeddingModelIdentity,
   config: ZvecGrepGlobalConfig = readGlobalConfig(),
   workspaceRuntime: EmbeddingRuntimeConfig = {},
+  embeddingConcurrency?: number,
 ): CreateEmbeddingModelOptions & { apiKey: string } {
   const reference = embeddingModelReference(identity);
+  const backend = getEmbeddingModelCatalogEntry(reference)?.backend;
+  const parallelism =
+    backend === "llama-cpp" || backend === "transformers-js"
+      ? normalizeLocalEmbeddingConcurrency(embeddingConcurrency)
+      : undefined;
   const runtime = resolveEmbeddingRuntimeOptions(
     reference,
     options,
@@ -1421,6 +1584,30 @@ function providerOptions(
       process.env.ZVEC_GREP_MODEL_CACHE ??
       join(options.home ?? defaultHome(), "models"),
     device: runtime.device,
+    ...(parallelism !== undefined ? { embeddingConcurrency: parallelism } : {}),
+  };
+}
+
+function localEmbeddingVariant(
+  reference: string,
+  options: CreateEmbeddingModelOptions & { apiKey: string },
+): { family: string; concurrency?: number } | undefined {
+  const backend = getEmbeddingModelCatalogEntry(reference)?.backend;
+  if (backend !== "llama-cpp" && backend !== "transformers-js") {
+    return undefined;
+  }
+  return {
+    family: `${reference}/${providerOptionsFingerprint({
+      ...options,
+      embeddingConcurrency: undefined,
+    })}`,
+    concurrency:
+      options.embeddingConcurrency ??
+      (backend === "transformers-js" ||
+      options.device === "cpu" ||
+      options.device === undefined
+        ? 1
+        : undefined),
   };
 }
 
@@ -1493,10 +1680,16 @@ function providerOptionsFingerprint(options: {
   endpoint?: string;
   modelCacheDir?: string;
   device?: "auto" | "cpu" | "metal" | "vulkan" | "cuda";
+  embeddingConcurrency?: number;
 }): string {
   const publicOptionsFingerprint = createHash("sha256")
     .update(
-      JSON.stringify([options.endpoint, options.modelCacheDir, options.device]),
+      JSON.stringify([
+        options.endpoint,
+        options.modelCacheDir,
+        options.device,
+        options.embeddingConcurrency,
+      ]),
     )
     .digest("hex");
   return `${providerApiKeyIdentity(options.apiKey)}:${publicOptionsFingerprint}`;

@@ -117,6 +117,20 @@ The equivalent environment override is `ZVEC_GREP_DEVICE`. Model2Vec models
 such as Potion use static vector lookup, so selecting a GPU does not improve
 their runtime.
 
+For ONNX models using Transformers.js, `auto` uses the runtime's Node default
+(CPU). Select a GPU device explicitly when its hardware and runtime libraries
+are available. GGUF models retain their own automatic device selection.
+
+If Transformers.js cannot initialize a model, indexing stops instead of
+retrying the same load for every file. Correct the model or device configuration
+and restart the process or daemon before retrying; a failed first ONNX session
+can leave the runtime unusable for the rest of the process. For a GPU
+initialization error, restart and use `--device cpu` (or configure
+`ZVEC_GREP_DEVICE=cpu` in the daemon environment when no saved device overrides
+it). GPU inference failures after a successful initialization can still fall
+back to CPU. Model warnings are retained in the daemon log as `model.warning`
+events as well as sent through live progress.
+
 Override the download cache with `--model-cache` or `ZVEC_GREP_MODEL_CACHE`:
 
 ```bash
@@ -143,6 +157,17 @@ zg --index \
   --api-key "$DASHSCOPE_API_KEY" \
   --allow-remote
 ```
+
+For Qwen text models, the Rust CLI accepts either a full Embedding endpoint or
+an OpenAI-compatible API base URL ending in `/v1` (with an optional trailing
+slash). For example, `https://example.com/compatible-mode/v1` resolves to
+`https://example.com/compatible-mode/v1/embeddings`. Authorization and index
+metadata use the resolved request URL. Complete endpoints and custom paths are
+preserved; this expansion does not apply to the Qwen VL endpoint.
+
+If an endpoint returns an empty or non-JSON HTTP error response, the error
+reports the HTTP status. For HTTP 404, check the endpoint and whether the model
+is available at that service.
 
 Credentials configure access to a provider; they do not authorize data
 transfer. `--allow-remote` authorizes Remote Embedding only for the current

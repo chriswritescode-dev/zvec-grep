@@ -23,6 +23,12 @@ import { ZVEC_GREP_WORKSPACE_EVIDENCE_RULES } from "../dist/prompts/zvec-grep-gu
 
 const execFileAsync = promisify(execFile);
 const cliPath = resolve("dist/cli/index.js");
+// Keeps a VS Code profile on the developer's own machine from being detected
+// by the auto-target tests.
+const missingVsCodeUserDirectory = join(
+  tmpdir(),
+  "zvec-grep-missing-vscode-user",
+);
 
 test("interactive installer marker follows the active agent", () => {
   const detected = new Set(["claude", "codex"]);
@@ -39,6 +45,9 @@ test("interactive installer marker follows the active agent", () => {
   assert.match(qwen[2], /○ OpenCode\s+not found/);
   assert.match(qwen[3], /○ Cursor\s+not found/);
   assert.match(qwen[4], /● Qwen Code\s+not found/);
+  assert.match(qwen[6], /○ GitHub Copilot\s+not found/);
+  assert.match(qwen[7], /○ VS Code\s+not found/);
+  assert.match(qwen[8], /○ Grok Build\s+not found/);
   assert.match(codex.at(-1), /Use ↑↓ to move · Enter to select/);
   assert.doesNotMatch(codex.join("\n"), /Space|\[●\]/);
 });
@@ -522,6 +531,198 @@ test("Codex installer refreshes legacy managed guidance", async (t) => {
   assert.doesNotMatch(agents, /Remote data authorization/);
   assert.doesNotMatch(agents, /zg (?:--)?status/);
   assert.doesNotMatch(agents, /legacy guidance/);
+});
+
+test("Grok Build installer writes MCP entry, pre-approval, and global guidance", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-grok-"),
+  );
+  const grokHome = join(temporaryDirectory, ".grok");
+  const configPath = join(grokHome, "config.toml");
+  const guidancePath = join(grokHome, "rules", "zvec-grep.md");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await installTarget("grok", { GROK_HOME: grokHome });
+  await installTarget("grok", { GROK_HOME: grokHome });
+
+  const config = await readFile(configPath, "utf8");
+  assert.match(config, /\[mcp_servers\.zvec_grep\]/);
+  assert.match(config, /^command = "zg"$/m);
+  assert.match(config, /^args = \["--server", "--stdio"\]$/m);
+  assert.match(config, /^startup_timeout_sec = 120$/m);
+  assert.doesNotMatch(config, /^tool_timeout_sec\s*=/m);
+  assert.doesNotMatch(config, /^url\s*=/m);
+  assert.equal(countOccurrences(config, "# ZVEC_GREP_START"), 1);
+  assert.equal(countOccurrences(config, "# ZVEC_GREP_END"), 1);
+  assert.equal(countOccurrences(config, "# ZVEC_GREP_PERMISSION_START"), 1);
+  assert.equal(countOccurrences(config, "# ZVEC_GREP_PERMISSION_END"), 1);
+  assert.match(config, /^\[permission\]$/m);
+  assert.match(config, /^allow = \["MCPTool\(zvec_grep__\*\)"\]$/m);
+  assert.doesNotMatch(
+    config.slice(0, config.indexOf("# ZVEC_GREP_PERMISSION_START")),
+    /^\[permission\]$/m,
+  );
+
+  const guidance = await readFile(guidancePath, "utf8");
+  assert.equal(countOccurrences(guidance, "<!-- ZVEC_GREP_START -->"), 1);
+  assert.match(guidance, /## zvec-grep/);
+  assert.match(guidance, /### Grok Build host notes/);
+  assert.match(guidance, /zvec_grep__zvec_grep_search/);
+  assert.match(guidance, /zg --auth grant/);
+  assert.match(
+    guidance,
+    /Choose the evidence source before the retrieval mode/,
+  );
+  for (const rule of ZVEC_GREP_WORKSPACE_EVIDENCE_RULES) {
+    assert.ok(guidance.includes(`- ${rule}`));
+  }
+});
+
+test("Grok Build installer skips pre-approval when a [permission] table exists", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-grok-permission-"),
+  );
+  const grokHome = join(temporaryDirectory, ".grok");
+  const configPath = join(grokHome, "config.toml");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await mkdir(grokHome, { recursive: true });
+  const existing = [
+    '[model."custom"]',
+    'name = "custom"',
+    "",
+    "[permission]",
+    'allow = ["Bash(git *)"]',
+    "",
+  ].join("\n");
+  await writeFile(configPath, existing);
+
+  const { stdout } = await installTarget("grok", { GROK_HOME: grokHome });
+
+  const config = await readFile(configPath, "utf8");
+  assert.match(config, /\[mcp_servers\.zvec_grep\]/);
+  assert.match(config, /allow = \["Bash\(git \*\)"\]/);
+  assert.doesNotMatch(config, /ZVEC_GREP_PERMISSION/);
+  assert.match(stdout, /MCPTool\(zvec_grep__\*\)/);
+});
+
+test("Grok Build installer skips pre-approval for alternate TOML permission spellings", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-grok-permission-toml-"),
+  );
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  const spellings = [
+    {
+      name: "single-quoted header",
+      lines: ["['permission']", 'allow = ["Bash(git *)"]', ""],
+    },
+    {
+      name: "dotted root key",
+      lines: ['permission.allow = ["Bash(git *)"]', ""],
+    },
+    {
+      name: "inline table",
+      lines: ['permission = { allow = ["Bash(git *)"] }', ""],
+    },
+  ];
+
+  for (const { name, lines } of spellings) {
+    const grokHome = join(temporaryDirectory, name.replaceAll(" ", "-"));
+    await mkdir(grokHome, { recursive: true });
+    const configPath = join(grokHome, "config.toml");
+    await writeFile(configPath, [...lines, ""].join("\n"));
+
+    const { stdout } = await installTarget("grok", { GROK_HOME: grokHome });
+
+    const config = await readFile(configPath, "utf8");
+    assert.match(config, /\[mcp_servers\.zvec_grep\]/);
+    assert.doesNotMatch(config, /ZVEC_GREP_PERMISSION/);
+    assert.match(config, /allow = \["Bash\(git \*\)"\]/);
+    assert.match(stdout, /MCPTool\(zvec_grep__\*\)/);
+  }
+});
+
+test("Grok Build installer accepts grok-build and grok-cli aliases", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-grok-aliases-"),
+  );
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  for (const target of ["grok-build", "grok-cli"]) {
+    const grokHome = join(temporaryDirectory, target);
+    await installTarget(target, { GROK_HOME: grokHome });
+    const config = await readFile(join(grokHome, "config.toml"), "utf8");
+    assert.match(config, /\[mcp_servers\.zvec_grep\]/);
+  }
+});
+
+test("Grok Build installer writes HTTP transport with token header expansion", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-grok-http-"),
+  );
+  const grokHome = join(temporaryDirectory, ".grok");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await installTarget("grok", { GROK_HOME: grokHome }, [
+    "--mcp-transport",
+    "http",
+    "--mcp-token-env",
+    "ZVEC_GREP_SERVER_TOKEN",
+  ]);
+
+  const config = await readFile(join(grokHome, "config.toml"), "utf8");
+  assert.match(config, /^url = "http:\/\//m);
+  assert.match(
+    config,
+    /^headers = \{ Authorization = "Bearer \$\{ZVEC_GREP_SERVER_TOKEN\}" \}$/m,
+  );
+  assert.doesNotMatch(config, /startup_timeout_sec/);
+});
+
+test("Grok Build uninstaller removes only managed blocks and an empty rules file", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-uninstall-grok-"),
+  );
+  const grokHome = join(temporaryDirectory, ".grok");
+  const configPath = join(grokHome, "config.toml");
+  const guidancePath = join(grokHome, "rules", "zvec-grep.md");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await mkdir(join(grokHome, "rules"), { recursive: true });
+  await writeFile(
+    configPath,
+    '[mcp_servers.other]\ncommand = "other"\n\n[permission]\nallow = ["Bash(git *)"]\n',
+  );
+  await writeFile(guidancePath, "# Existing rules\n");
+
+  await installTarget("grok", { GROK_HOME: grokHome });
+  await uninstallTarget("grok", { GROK_HOME: grokHome });
+  await uninstallTarget("grok", { GROK_HOME: grokHome });
+
+  const config = await readFile(configPath, "utf8");
+  assert.match(config, /\[mcp_servers\.other\]\ncommand = "other"/);
+  assert.match(config, /allow = \["Bash\(git \*\)"\]/);
+  assert.doesNotMatch(config, /ZVEC_GREP|mcp_servers\.zvec_grep/);
+  assert.match(await readFile(guidancePath, "utf8"), /# Existing rules/);
+  assert.doesNotMatch(await readFile(guidancePath, "utf8"), /zvec-grep/);
+
+  const bareHome = join(temporaryDirectory, "bare");
+  await installTarget("grok", { GROK_HOME: bareHome });
+  await uninstallTarget("grok", { GROK_HOME: bareHome });
+  await assert.rejects(stat(join(bareHome, "rules", "zvec-grep.md")));
 });
 
 test("Claude Code installer configures MCP trust and guidance", async (t) => {
@@ -1873,6 +2074,7 @@ test(
         {
           env: {
             ...process.env,
+            VSCODE_USER_DIR: missingVsCodeUserDirectory,
             PATH: binaryDirectory,
             HOME: caseDirectory,
             USERPROFILE: caseDirectory,
@@ -1886,7 +2088,7 @@ test(
       assert.match(stdout, /Qoder/);
       assert.doesNotMatch(
         stdout,
-        /Claude Code|Codex|OpenCode|Cursor|Qwen Code/,
+        /Claude Code|Codex|OpenCode|Cursor|Qwen Code|GitHub Copilot|VS Code/,
       );
       const { cli, ide } = await readQoderConfigs(qoderConfigDirectory);
       assert.equal(cli.mcpServers.zvec_grep.command, "zg");
@@ -1925,6 +2127,7 @@ test(
       {
         env: {
           ...process.env,
+          VSCODE_USER_DIR: missingVsCodeUserDirectory,
           PATH: binaryDirectory,
           HOME: temporaryDirectory,
           USERPROFILE: temporaryDirectory,
@@ -1937,7 +2140,10 @@ test(
     );
 
     assert.match(stdout, /Qoder/);
-    assert.doesNotMatch(stdout, /Claude Code|Codex|OpenCode|Cursor|Qwen Code/);
+    assert.doesNotMatch(
+      stdout,
+      /Claude Code|Codex|OpenCode|Cursor|Qwen Code|GitHub Copilot|VS Code/,
+    );
     const cli = JSON.parse(
       await readFile(join(qoderConfigDirectory, "settings.json"), "utf8"),
     );
@@ -2047,6 +2253,164 @@ test("OpenCode installer preserves config and manages a remote MCP server", asyn
   assert.doesNotMatch(uninstalledGuidance, /ZVEC_GREP|## zvec-grep/);
 });
 
+test("OpenCode install and uninstall accept JSONC comments and trailing commas", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-opencode-jsonc-"),
+  );
+  const xdgConfigHome = join(temporaryDirectory, "config");
+  const configDirectory = join(xdgConfigHome, "opencode");
+  const jsoncPath = join(configDirectory, "opencode.jsonc");
+  const jsonPath = join(configDirectory, "opencode.json");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await mkdir(configDirectory, { recursive: true });
+  await writeFile(
+    jsoncPath,
+    `{
+  // Keep this user setting and its comment.
+  "model": "custom/model",
+  "mcp": {
+    "other": { "type": "remote", "url": "https://example.com/mcp", },
+  },
+}
+`,
+  );
+
+  const { stdout } = await installTarget("opencode", {
+    OPENCODE_CONFIG: undefined,
+    XDG_CONFIG_HOME: xdgConfigHome,
+  });
+
+  assert.ok(stdout.includes(`Config    ${jsoncPath}`));
+  await assert.rejects(stat(jsonPath), { code: "ENOENT" });
+  const installedSource = await readFile(jsoncPath, "utf8");
+  assert.match(installedSource, /Keep this user setting and its comment/);
+  const installed = parseJsonWithComments(installedSource, [], {
+    allowTrailingComma: true,
+  });
+  assert.equal(installed.model, "custom/model");
+  assert.equal(installed.mcp.other.url, "https://example.com/mcp");
+  assert.equal(installed.mcp.zvec_grep.enabled, true);
+
+  await uninstallTarget("opencode", {
+    OPENCODE_CONFIG: undefined,
+    XDG_CONFIG_HOME: xdgConfigHome,
+  });
+  const uninstalledSource = await readFile(jsoncPath, "utf8");
+  assert.match(uninstalledSource, /Keep this user setting and its comment/);
+  const uninstalled = parseJsonWithComments(uninstalledSource, [], {
+    allowTrailingComma: true,
+  });
+  assert.equal(uninstalled.mcp.zvec_grep, undefined);
+  assert.equal(uninstalled.mcp.other.url, "https://example.com/mcp");
+});
+
+test("OpenCode installer leaves an unmanaged JSONC entry byte-identical without force", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-opencode-jsonc-conflict-"),
+  );
+  const xdgConfigHome = join(temporaryDirectory, "config");
+  const configDirectory = join(xdgConfigHome, "opencode");
+  const configPath = join(configDirectory, "opencode.jsonc");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await mkdir(configDirectory, { recursive: true });
+  await writeFile(
+    configPath,
+    `{
+  // Keep this header and the unmanaged server exactly as written.
+  "model": "custom/model",
+  "mcp": {
+    "zvec_grep": {
+      "type": "remote",
+      "url": "https://example.com/unmanaged"
+    },
+    "other": { "type": "remote", "url": "https://example.com/mcp" }
+  }
+}
+`,
+  );
+  const original = await readFile(configPath);
+
+  await assert.rejects(
+    installTarget("opencode", {
+      OPENCODE_CONFIG: undefined,
+      XDG_CONFIG_HOME: xdgConfigHome,
+    }),
+    (error) => {
+      assert.match(error.stderr, /Existing unmanaged zvec_grep MCP server/);
+      assert.ok(error.stderr.includes(configPath));
+      assert.match(error.stderr, /--force/);
+      return true;
+    },
+  );
+
+  assert.deepEqual(await readFile(configPath), original);
+});
+
+test("OpenCode uninstaller removes legacy managed entries from both global configs", async (t) => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-install-opencode-both-"),
+  );
+  const xdgConfigHome = join(temporaryDirectory, "config");
+  const configDirectory = join(xdgConfigHome, "opencode");
+  const jsoncPath = join(configDirectory, "opencode.jsonc");
+  const jsonPath = join(configDirectory, "opencode.json");
+  t.after(async () => {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  await mkdir(configDirectory, { recursive: true });
+  const originalJson = `${JSON.stringify({
+    model: "json/model",
+    mcp: {
+      zvec_grep: {
+        type: "remote",
+        url: "http://127.0.0.1:7999/mcp",
+        enabled: true,
+      },
+      other: { type: "remote", url: "https://example.com/mcp" },
+    },
+  })}\n`;
+  await writeFile(jsonPath, originalJson);
+  await writeFile(
+    jsoncPath,
+    '{\n  // Active config\n  "model": "jsonc/model"\n}\n',
+  );
+
+  const { stdout } = await installTarget("opencode", {
+    OPENCODE_CONFIG: undefined,
+    XDG_CONFIG_HOME: xdgConfigHome,
+  });
+
+  assert.ok(stdout.includes(`Config    ${jsoncPath}`));
+  assert.match(
+    stdout,
+    /both opencode\.jsonc and opencode\.json exist; selected opencode\.jsonc/,
+  );
+  assert.equal(await readFile(jsonPath, "utf8"), originalJson);
+  const jsonc = parseJsonWithComments(await readFile(jsoncPath, "utf8"));
+  assert.equal(jsonc.mcp.zvec_grep.enabled, true);
+
+  await uninstallTarget("opencode", {
+    OPENCODE_CONFIG: undefined,
+    XDG_CONFIG_HOME: xdgConfigHome,
+  });
+
+  const uninstalledJson = JSON.parse(await readFile(jsonPath, "utf8"));
+  assert.equal(uninstalledJson.mcp.zvec_grep, undefined);
+  assert.equal(uninstalledJson.mcp.other.url, "https://example.com/mcp");
+  const uninstalledJsonc = parseJsonWithComments(
+    await readFile(jsoncPath, "utf8"),
+  );
+  assert.deepEqual(uninstalledJsonc.mcp, {});
+  assert.equal(uninstalledJsonc.model, "jsonc/model");
+});
+
 test("JSON installers require force before replacing an unmanaged server", async (t) => {
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), "zvec-grep-install-json-conflict-"),
@@ -2100,6 +2464,7 @@ test(
       {
         env: {
           ...process.env,
+          VSCODE_USER_DIR: missingVsCodeUserDirectory,
           PATH: binaryDirectory,
           HOME: temporaryDirectory,
           CLAUDE_CONFIG_DIR: claudeConfigDirectory,
@@ -2146,6 +2511,7 @@ test(
       {
         env: {
           ...process.env,
+          VSCODE_USER_DIR: missingVsCodeUserDirectory,
           PATH: binaryDirectory,
           HOME: temporaryDirectory,
           USERPROFILE: temporaryDirectory,
@@ -2157,13 +2523,816 @@ test(
     );
 
     assert.match(stdout, /Qwen Code/);
-    assert.doesNotMatch(stdout, /Claude Code|Codex|OpenCode|Cursor/);
+    assert.doesNotMatch(
+      stdout,
+      /Claude Code|Codex|OpenCode|Cursor|GitHub Copilot|VS Code/,
+    );
     const config = JSON.parse(
       await readFile(join(qwenHome, "settings.json"), "utf8"),
     );
     assert.equal(config.mcpServers.zvec_grep.command, "zg");
   },
 );
+
+test("GitHub Copilot installer manages a user-level stdio MCP server", async (t) => {
+  const directory = await createTemporaryDirectory(t, "install-copilot");
+  const copilot = copilotFixture(directory);
+  const { configPath, guidancePath } = copilot;
+
+  await mkdir(copilot.copilotHome, { recursive: true });
+  await writeFile(guidancePath, "# Existing Copilot instructions\n");
+  await writeFile(
+    configPath,
+    `${JSON.stringify(
+      {
+        mcpServers: {
+          other: { type: "local", command: "npx", args: ["@other/server"] },
+        },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+
+  await copilot.install();
+
+  const config = JSON.parse(await readFile(configPath, "utf8"));
+  assert.deepEqual(config.mcpServers.other, {
+    type: "local",
+    command: "npx",
+    args: ["@other/server"],
+  });
+  assert.deepEqual(config.mcpServers.zvec_grep, {
+    type: "local",
+    command: "zg",
+    args: ["--server", "--stdio"],
+    tools: ["*"],
+    timeout: 600000,
+  });
+
+  const guidance = await readFile(guidancePath, "utf8");
+  assert.match(guidance, /^# Existing Copilot instructions$/m);
+  assert.match(guidance, /<!-- ZVEC_GREP_START -->/);
+  assert.match(guidance, /zvec_grep_search/);
+  assert.match(guidance, /^## zvec-grep$/m);
+
+  await copilot.install();
+  const repeated = await readFile(configPath, "utf8");
+  assert.equal(repeated, `${JSON.stringify(config, null, 2)}\n`);
+  assert.equal(await readFile(guidancePath, "utf8"), guidance);
+
+  await copilot.uninstall();
+  const uninstalled = JSON.parse(await readFile(configPath, "utf8"));
+  assert.equal(uninstalled.mcpServers.zvec_grep, undefined);
+  assert.deepEqual(uninstalled.mcpServers.other, {
+    type: "local",
+    command: "npx",
+    args: ["@other/server"],
+  });
+  const remainingGuidance = await readFile(guidancePath, "utf8");
+  assert.match(remainingGuidance, /^# Existing Copilot instructions$/m);
+  assert.doesNotMatch(remainingGuidance, /ZVEC_GREP_START/);
+});
+
+test("GitHub Copilot installer writes an HTTP MCP entry", async (t) => {
+  const directory = await createTemporaryDirectory(t, "install-copilot-http");
+  const copilot = copilotFixture(directory);
+
+  await copilot.install([
+    "--mcp-transport",
+    "http",
+    "--mcp-toolset",
+    "full",
+    "--mcp-token-env",
+    "ZVEC_GREP_SERVER_TOKEN",
+  ]);
+
+  const config = JSON.parse(await readFile(copilot.configPath, "utf8"));
+  assert.deepEqual(config.mcpServers.zvec_grep, {
+    type: "http",
+    url: "http://127.0.0.1:7999/mcp",
+    headers: {
+      Authorization: "Bearer ${ZVEC_GREP_SERVER_TOKEN}",
+    },
+    tools: ["*"],
+    timeout: 600000,
+  });
+});
+
+test("GitHub Copilot installer records the selected MCP toolset", async (t) => {
+  const directory = await createTemporaryDirectory(
+    t,
+    "install-copilot-toolset",
+  );
+  const copilot = copilotFixture(directory);
+
+  await copilot.install(["--mcp-toolset", "full"]);
+
+  const config = JSON.parse(await readFile(copilot.configPath, "utf8"));
+  assert.deepEqual(config.mcpServers.zvec_grep.args, [
+    "--server",
+    "--stdio",
+    "--mcp-toolset",
+    "full",
+  ]);
+});
+
+test("GitHub Copilot installer carries the MCP tool timeout in milliseconds", async (t) => {
+  const directory = await createTemporaryDirectory(
+    t,
+    "install-copilot-timeout",
+  );
+  const copilot = copilotFixture(directory);
+
+  await copilot.install(["--mcp-tool-timeout", "900"]);
+  const stdio = JSON.parse(await readFile(copilot.configPath, "utf8"));
+  assert.equal(stdio.mcpServers.zvec_grep.timeout, 900000);
+
+  await copilot.install([
+    "--mcp-transport",
+    "http",
+    "--mcp-tool-timeout",
+    "45",
+  ]);
+  const http = JSON.parse(await readFile(copilot.configPath, "utf8"));
+  assert.equal(http.mcpServers.zvec_grep.type, "http");
+  assert.equal(http.mcpServers.zvec_grep.timeout, 45000);
+});
+
+test("GitHub Copilot installer requires --force to replace an unmanaged entry", async (t) => {
+  const directory = await createTemporaryDirectory(t, "install-copilot-force");
+  const copilot = copilotFixture(directory);
+
+  await mkdir(copilot.copilotHome, { recursive: true });
+  await writeFile(
+    copilot.configPath,
+    `${JSON.stringify(
+      {
+        mcpServers: {
+          zvec_grep: { type: "local", command: "custom-zvec", args: [] },
+        },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+
+  await assert.rejects(
+    () => copilot.install(),
+    /Existing unmanaged zvec_grep MCP server/,
+  );
+  const unchanged = JSON.parse(await readFile(copilot.configPath, "utf8"));
+  assert.equal(unchanged.mcpServers.zvec_grep.command, "custom-zvec");
+
+  await copilot.install(["--force"]);
+  const replaced = JSON.parse(await readFile(copilot.configPath, "utf8"));
+  assert.equal(replaced.mcpServers.zvec_grep.command, "zg");
+});
+
+test("GitHub Copilot uninstall preserves an unmanaged zvec_grep entry", async (t) => {
+  const directory = await createTemporaryDirectory(
+    t,
+    "uninstall-copilot-unmanaged",
+  );
+  const copilot = copilotFixture(directory);
+
+  await mkdir(copilot.copilotHome, { recursive: true });
+  await writeFile(
+    copilot.configPath,
+    `${JSON.stringify(
+      {
+        mcpServers: {
+          zvec_grep: { type: "local", command: "custom-zvec", args: [] },
+        },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+
+  await copilot.uninstall();
+  const config = JSON.parse(await readFile(copilot.configPath, "utf8"));
+  assert.equal(config.mcpServers.zvec_grep.command, "custom-zvec");
+});
+
+test(
+  "auto target detects the GitHub Copilot CLI executable",
+  {
+    skip:
+      process.platform === "win32" ? "executable mode semantics differ" : false,
+  },
+  async (t) => {
+    const directory = await createTemporaryDirectory(t, "install-auto-copilot");
+    const binaryDirectory = join(directory, "bin");
+    const copilot = copilotFixture(directory);
+
+    await mkdir(binaryDirectory, { recursive: true });
+    await writeExecutable(join(binaryDirectory, "copilot"));
+
+    const stdout = await runAutoInstall({
+      VSCODE_USER_DIR: missingVsCodeUserDirectory,
+      PATH: binaryDirectory,
+      HOME: directory,
+      USERPROFILE: directory,
+      COPILOT_HOME: copilot.copilotHome,
+      QODER_IDE_EXECUTABLE: join(directory, "missing-qoder-ide"),
+    });
+
+    assert.match(stdout, /GitHub Copilot/);
+    const config = JSON.parse(await readFile(copilot.configPath, "utf8"));
+    assert.equal(config.mcpServers.zvec_grep.command, "zg");
+  },
+);
+
+test("install help documents the GitHub Copilot target", async () => {
+  const { stdout } = await execFileAsync(process.execPath, [
+    cliPath,
+    "--help",
+    "install",
+  ]);
+  assert.match(stdout, /copilot/);
+});
+
+test("VS Code installer manages the user profile mcp.json", async (t) => {
+  const directory = await createTemporaryDirectory(t, "install-vscode");
+  const vscode = vsCodeFixture(directory);
+  const { configPath, instructionsPath } = vscode;
+
+  await mkdir(vscode.userDirectory, { recursive: true });
+  await writeFile(
+    configPath,
+    `{
+  // Keep my own server and this comment.
+  "servers": {
+    "memory": { "command": "npx", "args": ["-y", "@mcp/memory"] }
+  },
+  "inputs": []
+}
+`,
+  );
+
+  await vscode.install();
+
+  const source = await readFile(configPath, "utf8");
+  assert.match(source, /Keep my own server and this comment\./);
+  const config = parseJsonWithComments(source);
+  assert.deepEqual(config.servers.memory, {
+    command: "npx",
+    args: ["-y", "@mcp/memory"],
+  });
+  assert.deepEqual(config.servers.zvec_grep, {
+    type: "stdio",
+    command: "zg",
+    args: ["--server", "--stdio"],
+  });
+  assert.deepEqual(config.inputs, []);
+
+  const guidance = await readFile(instructionsPath, "utf8");
+  assert.match(guidance, /^---\napplyTo: '\*\*'\n---$/m);
+  assert.match(guidance, /<!-- ZVEC_GREP_START -->/);
+  assert.match(guidance, /^## zvec-grep$/m);
+  assert.ok(
+    guidance.indexOf("applyTo") < guidance.indexOf("ZVEC_GREP_START"),
+    "frontmatter must precede the managed block",
+  );
+
+  await vscode.install();
+  assert.equal(await readFile(configPath, "utf8"), source);
+  assert.equal(await readFile(instructionsPath, "utf8"), guidance);
+
+  await vscode.uninstall();
+  const uninstalled = parseJsonWithComments(await readFile(configPath, "utf8"));
+  assert.equal(uninstalled.servers.zvec_grep, undefined);
+  assert.deepEqual(uninstalled.servers.memory, {
+    command: "npx",
+    args: ["-y", "@mcp/memory"],
+  });
+  await assert.rejects(() => readFile(instructionsPath, "utf8"), /ENOENT/);
+  // The shared guidance is gone, so the entry installed for the Copilot CLI and
+  // Agent Host must not outlive it.
+  const copilotConfig = JSON.parse(
+    await readFile(vscode.copilotConfigPath, "utf8"),
+  );
+  assert.deepEqual(copilotConfig, {});
+});
+
+test("VS Code installer keeps only fields VS Code accepts", async (t) => {
+  const directory = await createTemporaryDirectory(t, "install-vscode-schema");
+  const vscode = vsCodeFixture(directory);
+
+  // VS Code validates `servers` entries with `additionalProperties: false`,
+  // so an extra field such as `timeout` or `tools` breaks the entry.
+  const stdioFields = new Set([
+    "type",
+    "command",
+    "args",
+    "cwd",
+    "env",
+    "envFile",
+    "dev",
+    "sandboxEnabled",
+  ]);
+  const httpFields = new Set(["type", "url", "headers", "oauth", "dev"]);
+
+  await vscode.install();
+  const stdio = parseJsonWithComments(
+    await readFile(vscode.configPath, "utf8"),
+  );
+  for (const field of Object.keys(stdio.servers.zvec_grep)) {
+    assert.ok(stdioFields.has(field), `unexpected stdio field: ${field}`);
+  }
+
+  await vscode.install([
+    "--mcp-transport",
+    "http",
+    "--mcp-tool-timeout",
+    "900",
+    "--mcp-token-env",
+    "ZVEC_GREP_SERVER_TOKEN",
+  ]);
+  const http = parseJsonWithComments(await readFile(vscode.configPath, "utf8"));
+  assert.deepEqual(http.servers.zvec_grep, {
+    type: "http",
+    url: "http://127.0.0.1:7999/mcp",
+    headers: {
+      Authorization: "Bearer ${env:ZVEC_GREP_SERVER_TOKEN}",
+    },
+  });
+  for (const field of Object.keys(http.servers.zvec_grep)) {
+    assert.ok(httpFields.has(field), `unexpected http field: ${field}`);
+  }
+});
+
+test("VS Code installer accepts comments and trailing commas in mcp.json", async (t) => {
+  const directory = await createTemporaryDirectory(t, "install-vscode-jsonc");
+  const vscode = vsCodeFixture(directory);
+  const source = `{
+  // VS Code allows comments,
+  "servers": {
+    "memory": { "command": "npx" },
+  },
+  "inputs": [],
+}
+`;
+
+  await mkdir(vscode.userDirectory, { recursive: true });
+  await writeFile(vscode.configPath, source);
+
+  await vscode.install();
+
+  const installed = await readFile(vscode.configPath, "utf8");
+  assert.match(installed, /VS Code allows comments/);
+  const config = parseJsonWithComments(installed);
+  assert.equal(config.servers.memory.command, "npx");
+  assert.equal(config.servers.zvec_grep.command, "zg");
+
+  await vscode.uninstall();
+
+  const uninstalled = await readFile(vscode.configPath, "utf8");
+  assert.match(uninstalled, /VS Code allows comments/);
+  assert.doesNotMatch(uninstalled, /zvec_grep/);
+  assert.equal(
+    parseJsonWithComments(uninstalled, undefined, {
+      allowTrailingComma: true,
+    }).servers.memory.command,
+    "npx",
+  );
+});
+
+test("VS Code installer requires --force to replace an unmanaged entry", async (t) => {
+  const directory = await createTemporaryDirectory(t, "install-vscode-force");
+  const vscode = vsCodeFixture(directory);
+  const unmanagedConfig = `${JSON.stringify(
+    { servers: { zvec_grep: { command: "custom-zvec", args: [] } } },
+    null,
+    2,
+  )}\n`;
+
+  await mkdir(vscode.userDirectory, { recursive: true });
+  await writeFile(vscode.configPath, unmanagedConfig);
+
+  await assert.rejects(
+    () => vscode.install(),
+    /Existing unmanaged zvec_grep MCP server/,
+  );
+  // The conflict is detected before any file, including the Copilot entry the
+  // shared guidance needs, is written.
+  await assert.rejects(
+    () => readFile(vscode.copilotConfigPath, "utf8"),
+    /ENOENT/,
+  );
+
+  await vscode.install(["--force"]);
+  const config = parseJsonWithComments(
+    await readFile(vscode.configPath, "utf8"),
+  );
+  assert.equal(config.servers.zvec_grep.command, "zg");
+
+  // Uninstall must leave an unmanaged entry alone.
+  await writeFile(vscode.configPath, unmanagedConfig);
+  await vscode.uninstall();
+  const preserved = parseJsonWithComments(
+    await readFile(vscode.configPath, "utf8"),
+  );
+  assert.equal(preserved.servers.zvec_grep.command, "custom-zvec");
+});
+
+test("VS Code guidance installs the Copilot CLI entry for every reader", async (t) => {
+  const directory = await createTemporaryDirectory(t, "install-vscode-shared");
+  const vscode = vsCodeFixture(directory);
+
+  await vscode.install();
+
+  // The same instructions file is read by VS Code, Agent Host, and the Copilot
+  // CLI, so the Copilot home has to resolve the server too.
+  const copilotConfig = JSON.parse(
+    await readFile(vscode.copilotConfigPath, "utf8"),
+  );
+  assert.deepEqual(copilotConfig.mcpServers.zvec_grep, {
+    type: "local",
+    command: "zg",
+    args: ["--server", "--stdio"],
+    tools: ["*"],
+    timeout: 600000,
+  });
+
+  // Uninstalling VS Code leaves no entry behind once nothing reads the guidance.
+  await vscode.uninstall();
+  await assert.rejects(
+    () => readFile(vscode.instructionsPath, "utf8"),
+    /ENOENT/,
+  );
+  const remaining = JSON.parse(
+    await readFile(vscode.copilotConfigPath, "utf8"),
+  );
+  assert.deepEqual(remaining, {});
+});
+
+test("uninstalling Copilot keeps the entry the shared VS Code guidance needs", async (t) => {
+  const directory = await createTemporaryDirectory(
+    t,
+    "uninstall-copilot-shared",
+  );
+  const vscode = vsCodeFixture(directory);
+  const copilot = copilotFixture(directory);
+
+  await copilot.install();
+  await vscode.install();
+
+  await copilot.uninstall();
+
+  // The Copilot CLI still reads the shared instructions, which name the managed
+  // toolset, so its entry stays while VS Code remains installed.
+  const copilotConfig = JSON.parse(await readFile(copilot.configPath, "utf8"));
+  assert.equal(copilotConfig.mcpServers.zvec_grep.command, "zg");
+  const copilotGuidance = await readFile(copilot.guidancePath, "utf8");
+  assert.doesNotMatch(copilotGuidance, /ZVEC_GREP_START/);
+  assert.match(
+    await readFile(vscode.instructionsPath, "utf8"),
+    /ZVEC_GREP_START/,
+  );
+
+  // Removing VS Code afterwards drops the shared guidance and with it the entry.
+  await vscode.uninstall();
+  const remaining = JSON.parse(await readFile(copilot.configPath, "utf8"));
+  assert.deepEqual(remaining, {});
+});
+
+test("VS Code installer ensures the applyTo frontmatter of an existing file", async (t) => {
+  const directory = await createTemporaryDirectory(
+    t,
+    "install-vscode-frontmatter",
+  );
+  const vscode = vsCodeFixture(directory);
+
+  await mkdir(join(vscode.copilotHome, "instructions"), { recursive: true });
+  await writeFile(vscode.instructionsPath, "My own notes.\n");
+
+  await vscode.install();
+
+  const guidance = await readFile(vscode.instructionsPath, "utf8");
+  assert.match(guidance, /^---\napplyTo: '\*\*'\n---$/m);
+  assert.match(guidance, /My own notes\./);
+  assert.match(guidance, /ZVEC_GREP_START/);
+  assert.ok(
+    guidance.indexOf("applyTo") < guidance.indexOf("My own notes."),
+    "frontmatter must precede the user content",
+  );
+
+  await vscode.uninstall();
+
+  // Uninstall restores the user's file without the header this installer added.
+  const remaining = await readFile(vscode.instructionsPath, "utf8");
+  assert.doesNotMatch(remaining, /applyTo/);
+  assert.doesNotMatch(remaining, /ZVEC_GREP_START/);
+  assert.match(remaining, /My own notes\./);
+});
+
+test("VS Code installer completes a frontmatter without applyTo", async (t) => {
+  const directory = await createTemporaryDirectory(
+    t,
+    "install-vscode-frontmatter-merge",
+  );
+  const vscode = vsCodeFixture(directory);
+
+  await mkdir(join(vscode.copilotHome, "instructions"), { recursive: true });
+  await writeFile(
+    vscode.instructionsPath,
+    `---
+description: my own instructions
+---
+My own notes.
+`,
+  );
+
+  await vscode.install();
+
+  const guidance = await readFile(vscode.instructionsPath, "utf8");
+  assert.match(
+    guidance,
+    /^---\napplyTo: '\*\*'\ndescription: my own instructions\n---$/m,
+  );
+  assert.match(guidance, /My own notes\./);
+  assert.match(guidance, /ZVEC_GREP_START/);
+});
+
+test("VS Code installer refuses to widen a user-scoped instructions file", async (t) => {
+  const directory = await createTemporaryDirectory(t, "install-vscode-scoped");
+  const vscode = vsCodeFixture(directory);
+
+  await mkdir(join(vscode.copilotHome, "instructions"), { recursive: true });
+  await writeFile(
+    vscode.instructionsPath,
+    `---
+applyTo: "src/**"
+---
+Only for src.
+`,
+  );
+
+  await assert.rejects(
+    () => vscode.install(),
+    /scopes its instructions with applyTo: "src\/\*\*"/,
+  );
+
+  // Nothing is written when the guidance cannot be managed safely.
+  await assert.rejects(() => readFile(vscode.configPath, "utf8"), /ENOENT/);
+  assert.match(await readFile(vscode.instructionsPath, "utf8"), /src\/\*\*/);
+});
+
+test("VS Code uninstall preserves user-authored guidance", async (t) => {
+  const directory = await createTemporaryDirectory(
+    t,
+    "uninstall-vscode-guidance",
+  );
+  const vscode = vsCodeFixture(directory);
+
+  await vscode.install();
+  const installed = await readFile(vscode.instructionsPath, "utf8");
+  await writeFile(vscode.instructionsPath, `${installed}\nMy own note.\n`);
+
+  await vscode.uninstall();
+  const remaining = await readFile(vscode.instructionsPath, "utf8");
+  assert.match(remaining, /My own note\./);
+  assert.doesNotMatch(remaining, /ZVEC_GREP_START/);
+});
+
+test("VS Code uninstall removes a guidance file it emptied", async (t) => {
+  const directory = await createTemporaryDirectory(t, "uninstall-vscode-empty");
+  const vscode = vsCodeFixture(directory);
+
+  await vscode.install();
+  const installed = await readFile(vscode.instructionsPath, "utf8");
+  // A file holding only the managed block has to disappear rather than survive
+  // as an empty instruction file.
+  await writeFile(
+    vscode.instructionsPath,
+    installed.slice(installed.indexOf("<!-- ZVEC_GREP_START -->")),
+  );
+
+  await vscode.uninstall();
+  await assert.rejects(
+    () => readFile(vscode.instructionsPath, "utf8"),
+    /ENOENT/,
+  );
+
+  // A missing guidance file stays a no-op.
+  await vscode.uninstall();
+  await assert.rejects(
+    () => readFile(vscode.instructionsPath, "utf8"),
+    /ENOENT/,
+  );
+});
+
+test("VS Code target resolves the profile directory from VSCODE_PORTABLE", async (t) => {
+  const directory = await createTemporaryDirectory(
+    t,
+    "install-vscode-portable",
+  );
+  const copilot = copilotFixture(directory);
+
+  await installTarget("vscode", {
+    VSCODE_USER_DIR: undefined,
+    VSCODE_PORTABLE: directory,
+    COPILOT_HOME: copilot.copilotHome,
+  });
+
+  const config = parseJsonWithComments(
+    await readFile(join(directory, "user-data", "User", "mcp.json"), "utf8"),
+  );
+  assert.equal(config.servers.zvec_grep.command, "zg");
+});
+
+test(
+  "auto target detects an existing VS Code user profile",
+  {
+    skip:
+      process.platform === "win32" ? "executable mode semantics differ" : false,
+  },
+  async (t) => {
+    const directory = await createTemporaryDirectory(t, "install-auto-vscode");
+
+    await mkdir(join(directory, "Code", "User"), { recursive: true });
+    const stdout = await runAutoInstall({
+      VSCODE_USER_DIR: undefined,
+      VSCODE_APPDATA: directory,
+      PATH: join(directory, "empty-bin"),
+      HOME: directory,
+      USERPROFILE: directory,
+      COPILOT_HOME: join(directory, ".copilot"),
+      QODER_IDE_EXECUTABLE: join(directory, "missing-qoder-ide"),
+    });
+
+    assert.match(stdout, /VS Code/);
+    const config = parseJsonWithComments(
+      await readFile(join(directory, "Code", "User", "mcp.json"), "utf8"),
+    );
+    assert.equal(config.servers.zvec_grep.command, "zg");
+  },
+);
+
+test(
+  "auto target configures the VS Code Insiders profile when only Insiders is installed",
+  {
+    skip:
+      process.platform === "win32" ? "executable mode semantics differ" : false,
+  },
+  async (t) => {
+    const directory = await createTemporaryDirectory(
+      t,
+      "install-auto-insiders",
+    );
+    const binaryDirectory = join(directory, "bin");
+
+    await mkdir(binaryDirectory, { recursive: true });
+    await writeExecutable(join(binaryDirectory, "code-insiders"));
+
+    const stdout = await runAutoInstall({
+      VSCODE_USER_DIR: undefined,
+      VSCODE_APPDATA: directory,
+      PATH: binaryDirectory,
+      HOME: directory,
+      USERPROFILE: directory,
+      COPILOT_HOME: join(directory, ".copilot"),
+      QODER_IDE_EXECUTABLE: join(directory, "missing-qoder-ide"),
+    });
+
+    assert.match(stdout, /VS Code/);
+    const config = parseJsonWithComments(
+      await readFile(
+        join(directory, "Code - Insiders", "User", "mcp.json"),
+        "utf8",
+      ),
+    );
+    assert.equal(config.servers.zvec_grep.command, "zg");
+    // The Stable profile stays untouched, so no host is told it is configured
+    // while reading a file it never loads.
+    await assert.rejects(
+      () => readFile(join(directory, "Code", "User", "mcp.json"), "utf8"),
+      /ENOENT/,
+    );
+  },
+);
+
+test(
+  "VS Code installer configures every detected release channel",
+  {
+    skip:
+      process.platform === "win32" ? "executable mode semantics differ" : false,
+  },
+  async (t) => {
+    const directory = await createTemporaryDirectory(t, "install-channels");
+    const binaryDirectory = join(directory, "bin");
+
+    await mkdir(binaryDirectory, { recursive: true });
+    await writeExecutable(join(binaryDirectory, "code"));
+    await writeExecutable(join(binaryDirectory, "code-insiders"));
+
+    await installTarget("vscode", {
+      VSCODE_USER_DIR: undefined,
+      VSCODE_APPDATA: directory,
+      PATH: binaryDirectory,
+      COPILOT_HOME: join(directory, ".copilot"),
+    });
+
+    for (const productDirectory of ["Code", "Code - Insiders"]) {
+      const config = parseJsonWithComments(
+        await readFile(
+          join(directory, productDirectory, "User", "mcp.json"),
+          "utf8",
+        ),
+      );
+      assert.equal(config.servers.zvec_grep.command, "zg");
+    }
+
+    await uninstallTarget("vscode", {
+      VSCODE_USER_DIR: undefined,
+      VSCODE_APPDATA: directory,
+      PATH: binaryDirectory,
+      COPILOT_HOME: join(directory, ".copilot"),
+    });
+    for (const productDirectory of ["Code", "Code - Insiders"]) {
+      const config = parseJsonWithComments(
+        await readFile(
+          join(directory, productDirectory, "User", "mcp.json"),
+          "utf8",
+        ),
+      );
+      assert.equal(config.servers?.zvec_grep, undefined);
+    }
+  },
+);
+
+const VSCODE_INSTRUCTIONS_FILE = "zvec-grep.instructions.md";
+
+async function createTemporaryDirectory(t, prefix) {
+  const directory = await mkdtemp(join(tmpdir(), `zvec-grep-${prefix}-`));
+  t.after(async () => {
+    await rm(directory, { recursive: true, force: true });
+  });
+  return directory;
+}
+
+async function writeExecutable(path) {
+  await writeFile(path, "#!/bin/sh\nexit 0\n");
+  await chmod(path, 0o755);
+}
+
+// Copilot CLI and VS Code share `$COPILOT_HOME`: the CLI configuration, its own
+// instructions, and the user-level instructions folder VS Code also reads.
+function copilotFixture(directory, environment = {}) {
+  const copilotHome = join(directory, ".copilot");
+  const env = { COPILOT_HOME: copilotHome, ...environment };
+  return {
+    environment: env,
+    copilotHome,
+    configPath: join(copilotHome, "mcp-config.json"),
+    guidancePath: join(copilotHome, "copilot-instructions.md"),
+    instructionsPath: join(
+      copilotHome,
+      "instructions",
+      VSCODE_INSTRUCTIONS_FILE,
+    ),
+    install: (extraArgs = []) => installTarget("copilot", env, extraArgs),
+    uninstall: (extraArgs = []) => uninstallTarget("copilot", env, extraArgs),
+  };
+}
+
+function vsCodeFixture(directory) {
+  const copilot = copilotFixture(directory);
+  const userDirectory = join(directory, "Code", "User");
+  const environment = {
+    ...copilot.environment,
+    VSCODE_USER_DIR: userDirectory,
+  };
+  return {
+    ...copilot,
+    environment,
+    userDirectory,
+    copilotConfigPath: copilot.configPath,
+    copilotGuidancePath: copilot.guidancePath,
+    configPath: join(userDirectory, "mcp.json"),
+    install: (extraArgs = []) =>
+      installTarget("vscode", environment, extraArgs),
+    uninstall: (extraArgs = []) =>
+      uninstallTarget("vscode", environment, extraArgs),
+  };
+}
+
+// Detected-agent install, used by the `auto` target tests.
+async function runAutoInstall(environment) {
+  const env = { ...process.env, ZVEC_GREP_INSTALL_SKIP_SERVER: "1" };
+  for (const [key, value] of Object.entries(environment)) {
+    if (value === undefined) delete env[key];
+    else env[key] = value;
+  }
+  const { stdout } = await execFileAsync(
+    process.execPath,
+    [cliPath, "--install", "--yes"],
+    { env },
+  );
+  return stdout;
+}
 
 async function installCodex(codexHome, extraArgs = []) {
   await execFileAsync(

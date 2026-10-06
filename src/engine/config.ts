@@ -45,6 +45,12 @@ export type ZvecGrepServerConfig = {
   port?: number;
 };
 
+export type ZvecGrepLogConfig = {
+  maxBytes?: number;
+  keep?: number;
+  level?: "info" | "debug";
+};
+
 export type ZvecGrepGlobalConfig = {
   version: 1;
   defaults?: ZvecGrepGlobalDefaults;
@@ -52,6 +58,7 @@ export type ZvecGrepGlobalConfig = {
   models?: Record<string, ZvecGrepEmbeddingModelConfig>;
   client?: ZvecGrepClientConfig;
   server?: ZvecGrepServerConfig;
+  log?: ZvecGrepLogConfig;
 };
 
 export type ZvecGrepGlobalConfigUpdate = {
@@ -60,6 +67,7 @@ export type ZvecGrepGlobalConfigUpdate = {
   models?: Record<string, ZvecGrepEmbeddingModelConfig>;
   client?: ZvecGrepClientConfig;
   server?: ZvecGrepServerConfig;
+  log?: ZvecGrepLogConfig;
 };
 
 export function resolveEmbeddingRuntimeOptions(
@@ -155,6 +163,7 @@ export function updateGlobalConfig(
         models: mergeModelConfigs(current.models, update.models),
         client: { ...current.client, ...update.client },
         server: { ...current.server, ...update.server },
+        log: { ...current.log, ...update.log },
       },
       path,
     );
@@ -189,7 +198,7 @@ function parseGlobalConfig(value: unknown, path: string): ZvecGrepGlobalConfig {
   }
   assertKnownFields(
     value,
-    ["version", "defaults", "providers", "models", "client", "server"],
+    ["version", "defaults", "providers", "models", "client", "server", "log"],
     path,
     "config",
   );
@@ -199,6 +208,7 @@ function parseGlobalConfig(value: unknown, path: string): ZvecGrepGlobalConfig {
   const models = parseModels(value.models, path);
   const client = parseClient(value.client, path);
   const server = parseServer(value.server, path);
+  const log = parseLog(value.log, path);
   return {
     version: GLOBAL_CONFIG_VERSION,
     ...(defaults ? { defaults } : {}),
@@ -206,7 +216,38 @@ function parseGlobalConfig(value: unknown, path: string): ZvecGrepGlobalConfig {
     ...(models ? { models } : {}),
     ...(client ? { client } : {}),
     ...(server ? { server } : {}),
+    ...(log ? { log } : {}),
   };
+}
+
+function parseLog(value: unknown, path: string): ZvecGrepLogConfig | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) throw invalidConfig(path, "log must be an object");
+  assertKnownFields(value, ["maxBytes", "keep", "level"], path, "log");
+  const log: ZvecGrepLogConfig = {};
+  for (const key of ["maxBytes", "keep"] as const) {
+    const number = value[key];
+    if (number === undefined) continue;
+    const minimum = key === "keep" ? 0 : 1;
+    if (
+      typeof number !== "number" ||
+      !Number.isSafeInteger(number) ||
+      number < minimum
+    ) {
+      throw invalidConfig(
+        path,
+        `log.${key} must be a safe integer >= ${minimum}`,
+      );
+    }
+    log[key] = number;
+  }
+  if (value.level !== undefined) {
+    if (value.level !== "info" && value.level !== "debug") {
+      throw invalidConfig(path, "log.level must be info or debug");
+    }
+    log.level = value.level;
+  }
+  return Object.keys(log).length ? log : undefined;
 }
 
 function parseModels(

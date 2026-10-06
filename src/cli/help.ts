@@ -42,6 +42,8 @@ const ENVIRONMENT_VARIABLES = {
   ZVEC_GREP_ENDPOINT: "Remote Embedding endpoint fallback",
   ZVEC_GREP_MODEL_CACHE: "Local embedding model cache directory",
   ZVEC_GREP_DEVICE: "Local embedding device: auto, cpu, metal, vulkan, or cuda",
+  ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY:
+    "Local/remote index-build/update embedding concurrency; explicit index CLI option takes precedence",
   DASHSCOPE_API_KEY: "Qwen credential fallback after ZVEC_GREP_API_KEY",
   QWEN_API_KEY: "Qwen credential fallback after DASHSCOPE_API_KEY",
   ZVEC_GREP_AUTHORIZATION_KEY_FILE:
@@ -49,10 +51,11 @@ const ENVIRONMENT_VARIABLES = {
   ZVEC_GREP_METAL_KEEP_RESIDENCY:
     "Set to 1 to keep llama.cpp Metal residency enabled (advanced)",
   ZVEC_GREP_LLAMA_CONTEXT_PARALLELISM:
-    "Positive llama.cpp context parallelism override (advanced)",
+    "Legacy llama.cpp index limit; index CLI option and environment take precedence",
   NO_COLOR: "Disable terminal colors",
   CODEX_HOME: "Codex configuration directory used by zg --install",
   CLAUDE_CONFIG_DIR: "Claude configuration directory used by zg --install",
+  GROK_HOME: "Grok Build configuration directory used by zg --install",
   QWEN_HOME: "Qwen Code configuration directory used by zg --install",
   QODER_CONFIG_DIR: "Qoder CLI configuration directory used by zg --install",
   QODER_IDE_MCP_PATH: "Full Qoder IDE mcp.json path used by zg --install",
@@ -60,6 +63,10 @@ const ENVIRONMENT_VARIABLES = {
     "Qoder IDE executable used by automatic install-target detection",
   OPENCODE_CONFIG: "OpenCode configuration file used by zg --install",
   CURSOR_CONFIG_DIR: "Cursor configuration directory used by zg --install",
+  COPILOT_HOME: "GitHub Copilot configuration directory used by zg --install",
+  VSCODE_USER_DIR: "VS Code User profile directory used by zg --install",
+  VSCODE_PORTABLE: "VS Code portable-mode directory honored by zg --install",
+  VSCODE_APPDATA: "VS Code application data directory honored by zg --install",
 } as const;
 
 type EnvironmentVariableName = keyof typeof ENVIRONMENT_VARIABLES;
@@ -197,8 +204,12 @@ Embedding options:
   --endpoint <url>                  Embedding provider endpoint
   --model-cache <path>              Local model cache directory
   --device <device>                 auto, cpu, metal, vulkan, cuda
-  --embedding-concurrency <n>       Embedding task concurrency
+  --index-embedding-concurrency <n> Index embedding concurrency limit
   --allow-remote                    Allow Remote Embedding for this command only
+
+Index concurrency limits llama.cpp contexts, Transformers.js calls in flight,
+or concurrent batches for other models. llama.cpp/Transformers.js cap it at 8.
+It does not change query-vector inference.
 
 File selection:
   -g, --glob <glob>                 Include paths; prefix with ! to exclude; repeatable
@@ -222,6 +233,7 @@ ${formatEnvironmentVariables([
   "ZVEC_GREP_MODEL_CACHE",
   "ZVEC_GREP_DEVICE",
   "ZVEC_GREP_INDEX_HOME",
+  "ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY",
 ])}
 
 New indexes use --embedding, ZVEC_GREP_EMBEDDING, a configured default, or the
@@ -320,10 +332,11 @@ ${formatEnvironmentVariables([
 See zg --help environment for daemon startup scope.`;
     case "install":
       return `Usage:
-  zg --install [--target codex|claude|qwen|qoder|opencode|cursor|all|auto] [--mcp-transport stdio|http] [--mcp-toolset agent|full] [--yes] [--force]
+  zg --install [--target codex|claude|qwen|qoder|opencode|cursor|copilot|vscode|grok|all|auto] [--mcp-transport stdio|http] [--mcp-toolset agent|full] [--yes] [--force]
 
 Options:
-  --target <agent>                  codex, claude, qwen, qoder, opencode, cursor, auto, or all; repeatable
+  --target <agent>                  codex, claude, qwen, qoder, opencode, cursor, copilot, vscode, grok, auto, or all;
+                                    repeatable
   --mcp-transport <stdio|http>      MCP connection mode (default: stdio)
   --mcp-toolset <agent|full>        Daemon MCP toolset (default: agent)
   --mcp-tool-timeout <seconds>      MCP tool timeout where supported (default: 600)
@@ -331,22 +344,30 @@ Options:
   --yes                             Install detected agents without prompting
   --force                           Replace conflicting unmanaged configuration
 
-The qoder target configures Qoder CLI and Qoder IDE together.
+The qoder target configures Qoder CLI and Qoder IDE together. The copilot
+target configures GitHub Copilot CLI and Agent Host. The vscode target
+configures every detected VS Code profile and shares the Copilot user
+instructions, so it also registers the server for Agent Host and the Copilot
+CLI. The grok target configures Grok Build's user-level config.toml, global
+rules file, and tool pre-approval.
 
 Interactive setup detects supported agents, configures stdio by default, and
 starts the shared daemon. In stdio mode an agent reconnect also starts the
 daemon automatically after a reboot. HTTP users manage later daemon restarts.
-Codex, Claude Code, Qwen Code, Qoder CLI, and OpenCode also receive managed
-guidance. Qoder IDE has no supported global Rules file, so only its MCP
-configuration is managed.
-Codex and Claude Code receive local tool pre-approval. Qoder's CLI-backed
+Codex, Claude Code, Qwen Code, Qoder CLI, OpenCode, GitHub Copilot, VS Code,
+and Grok Build
+also receive managed guidance. Qoder IDE has no supported global Rules file, so
+only its MCP configuration is managed.
+Codex and Claude Code receive local tool pre-approval. Grok Build receives
+pre-approval through its permission rules unless the configuration already
+defines a [permission] table. Qoder's CLI-backed
 runtime receives exact pre-approval for zvec_grep_search and zvec_grep_rg. Remote Embedding
 authorization remains separate and is requested by zvec-grep on first remote
 use. Restart the agent or open a new session after installation. This does not
 install the npm package.`;
     case "uninstall":
       return `Usage:
-  zg --uninstall [--target codex|claude|qwen|qoder|opencode|cursor|all|auto] [--yes]
+  zg --uninstall [--target codex|claude|qwen|qoder|opencode|cursor|copilot|vscode|grok|all|auto] [--yes]
 
 Removes zvec-grep-managed MCP configuration, agent-specific approval, and
 guidance. The qoder target removes the managed Qoder CLI and IDE integration
@@ -555,6 +576,7 @@ ${formatEnvironmentVariables([
   "ZVEC_GREP_ENDPOINT",
   "ZVEC_GREP_MODEL_CACHE",
   "ZVEC_GREP_DEVICE",
+  "ZVEC_GREP_INDEX_EMBEDDING_CONCURRENCY",
 ])}
 
 Qwen credential aliases:
@@ -578,6 +600,7 @@ Agent integration paths:
 ${formatEnvironmentVariables([
   "CODEX_HOME",
   "CLAUDE_CONFIG_DIR",
+  "GROK_HOME",
   "QWEN_HOME",
   "QODER_CONFIG_DIR",
   "QODER_IDE_MCP_PATH",
@@ -588,6 +611,7 @@ ${formatEnvironmentVariables([
 
 Precedence:
   Embedding runtime                 CLI > Workspace snapshot > Global config > Environment
+  Index embedding concurrency      Index CLI option > index environment > legacy llama variable > auto
   New-index model                  --embedding > ZVEC_GREP_EMBEDDING > Global config > Built-in local
   Client mode                      --mode > ZVEC_GREP_MODE > Global config
   Index home                       ZVEC_GREP_INDEX_HOME > Global config defaults.indexHome > <ZVEC_GREP_HOME>/workspaces
@@ -595,6 +619,9 @@ Precedence:
 
 Server scope:
   zg --index forwards its ZVEC_GREP_EMBEDDING default to Server and auto modes.
+  Explicit --index-embedding-concurrency is forwarded without restarting the daemon.
+  The index concurrency environment also applies to automatic indexing and refresh.
+  Index concurrency controls do not affect query-vector inference.
   Direct MCP calls use the embedding environment inherited by the daemon.
   Restart the daemon after changing its embedding runtime environment.
 
