@@ -472,20 +472,22 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     try {
       runtime = await this.runtimeManager.activate(requestedRoot);
     } catch (error) {
+      if (!(error instanceof DaemonError) || error.code !== "INDEX_MISSING") {
+        throw error;
+      }
+      if (input.autoUpdate === false) {
+        throw indexMissingError(requestedRoot);
+      }
       if (
-        input.autoUpdate !== false &&
-        error instanceof DaemonError &&
-        error.code === "INDEX_MISSING" &&
-        (await this.autoInitializeMissingIndex(
+        !(await this.autoInitializeMissingIndex(
           requestedRoot,
           input,
           options.authorization,
         ))
       ) {
-        runtime = await this.runtimeManager.activate(requestedRoot);
-      } else {
         throw error;
       }
+      runtime = await this.runtimeManager.activate(requestedRoot);
     }
     const releaseRuntimeActivity = runtime.beginActivity();
     try {
@@ -1690,7 +1692,7 @@ function indexBuildingError(
 function indexMissingError(canonicalRoot: string): DaemonError {
   return new DaemonError(
     "INDEX_MISSING",
-    `Search requires an existing workspace index for ${canonicalRoot}. Use an available exact-search fallback when it is sufficient. Creating or rebuilding a persistent index requires explicit user authorization.`,
+    `Search requires an existing workspace index for ${canonicalRoot}. Automatic index initialization was skipped because autoUpdate is false; retry without autoUpdate: false to let search build the index in the background, or use an available exact-search fallback when it is sufficient.`,
   );
 }
 

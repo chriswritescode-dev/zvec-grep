@@ -506,7 +506,9 @@ test("missing-index search starts one background build and returns retryable IND
         ...searchInput(root, "answer", "eventual"),
         autoUpdate: false,
       }),
-      (error) => error.code === "INDEX_MISSING",
+      (error) =>
+        error.code === "INDEX_MISSING" &&
+        error.message.includes("autoUpdate is false"),
     );
     assert.equal(backend.scheduler.getByRoot(canonicalRoot).id, job.id);
 
@@ -545,7 +547,9 @@ test("missing-index search does not auto-initialize when opted out or disabled",
         ...searchInput(root, "answer", "eventual"),
         autoUpdate: false,
       }),
-      (error) => error.code === "INDEX_MISSING",
+      (error) =>
+        error.code === "INDEX_MISSING" &&
+        error.message.includes("autoUpdate is false"),
     );
     const canonicalRoot = await realpath(root);
     assert.equal(backend.scheduler.getByRoot(canonicalRoot), undefined);

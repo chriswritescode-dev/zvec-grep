@@ -90,7 +90,7 @@ export class RuntimeManager {
     if (!info.indexed || !info.workspaceIndex?.embedding) {
       throw new DaemonError(
         "INDEX_MISSING",
-        `Indexed search requires a built zvec-grep index for ${info.root}. Use an available exact-search fallback when it is sufficient. Creating or rebuilding a persistent index requires explicit user authorization.`,
+        `Indexed search requires a built zvec-grep index for ${info.root}. Use an available exact-search fallback when it is sufficient.`,
       );
     }
     const canonicalRoot = await realpath(info.root);

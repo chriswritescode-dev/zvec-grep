@@ -255,7 +255,7 @@ export const zvecGrepSearchInputSchema = z.object({
     .boolean()
     .default(true)
     .describe(
-      "Whether an eventual search may schedule a background index update.",
+      "Whether a search may start a background build for a missing index and whether an eventual search may schedule a background index update.",
     ),
 });
 
