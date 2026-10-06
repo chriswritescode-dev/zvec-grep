@@ -162,6 +162,7 @@ export class RootLeaseManager {
     const timer = setInterval(() => {
       if (managed.stopped || managed.heartbeatInFlight) return;
       const heartbeat = (async () => {
+        if (managed.stopped) return;
         const guard = acquireDaemonLeaseGuard(root, this.instanceToken);
         if (!guard) return;
         try {
