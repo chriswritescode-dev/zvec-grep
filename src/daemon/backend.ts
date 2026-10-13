@@ -1,3 +1,6 @@
+import { realpath } from "node:fs/promises";
+import { homedir } from "node:os";
+import { parse, resolve, sep } from "node:path";
 import {
   createZvecGrep,
   resolveIndexEmbeddingConcurrency,
@@ -717,6 +720,9 @@ export class DaemonBackend implements ZvecGrepDaemonBackend {
     }
     if (info.indexPolicy === "disabled") {
       throw indexDisabledError(canonicalRoot);
+    }
+    if (await isBroadAutoIndexRoot(canonicalRoot)) {
+      throw broadAutoIndexRootError(canonicalRoot);
     }
     const latestJob = this.scheduler.getByRoot(canonicalRoot);
     if (latestJob) {
@@ -1739,6 +1745,30 @@ function indexDisabledError(canonicalRoot: string): DaemonError {
   return new DaemonError(
     "INDEX_MISSING",
     `Search requires an existing workspace index for ${canonicalRoot}, but the workspace index is disabled. Use an available exact-search fallback when it is sufficient. Creating or rebuilding a persistent index requires explicit user authorization.`,
+  );
+}
+
+function broadAutoIndexRootError(canonicalRoot: string): DaemonError {
+  return new DaemonError(
+    "INDEX_MISSING",
+    `Search requires an existing workspace index for ${canonicalRoot}, but automatic index initialization was skipped because ${canonicalRoot} is a home directory or filesystem root. Search from a specific project root instead, or use an available exact-search fallback (native Grep, rg, or zvec_grep_rg) when it is sufficient. Creating an index for this root still requires the user to run it deliberately.`,
+  );
+}
+
+async function isBroadAutoIndexRoot(canonicalRoot: string): Promise<boolean> {
+  if (parse(canonicalRoot).root === canonicalRoot) {
+    return true;
+  }
+  const home = homedir();
+  let canonicalHome: string;
+  try {
+    canonicalHome = await realpath(home);
+  } catch {
+    canonicalHome = resolve(home);
+  }
+  return (
+    canonicalRoot === canonicalHome ||
+    canonicalHome.startsWith(canonicalRoot + sep)
   );
 }
 

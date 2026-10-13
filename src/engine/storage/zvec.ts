@@ -72,6 +72,7 @@ const ZVEC_LOCK_FILE = "LOCK";
 const NO_MATCH_FILTER = "file_id = '__zvec_grep_no_match__'";
 const ZVEC_UPSERT_BATCH_SIZE = 1024;
 const ZVEC_MAX_QUERY_TOPK = 100_000;
+const MAX_FILTER_IN_LIST_SIZE = 10_000;
 const FILE_ID_HEX_ALPHABET = "0123456789abcdef";
 const ZVEC_OPEN_RETRY_ATTEMPTS = 8;
 const ZVEC_OPEN_RETRY_BASE_DELAY_MS = 100;
@@ -159,8 +160,8 @@ class ZvecWorkspaceIndexStorage implements WorkspaceIndexStorage {
       .map(([, file]) => fileRecordToInfo(file));
   }
 
-  listFiles(): FileInfo[] {
-    return [...this.filesById.values()].map(fileRecordToInfo);
+  listFiles(): readonly FileInfo[] {
+    return [...this.filesById.values()];
   }
 
   listEntitiesByFile(
@@ -1348,7 +1349,14 @@ function buildInFilter(field: string, values: readonly string[]): string {
     return `${field} = ${quoteFilterString(values[0])}`;
   }
 
-  return `(${values.map((value) => `${field} = ${quoteFilterString(value)}`).join(" OR ")})`;
+  const chunks: string[] = [];
+  for (let index = 0; index < values.length; index += MAX_FILTER_IN_LIST_SIZE) {
+    const chunk = values.slice(index, index + MAX_FILTER_IN_LIST_SIZE);
+    const quoted = chunk.map((value) => quoteFilterString(value)).join(", ");
+    chunks.push(`${field} IN (${quoted})`);
+  }
+
+  return chunks.length === 1 ? chunks[0] : `(${chunks.join(" OR ")})`;
 }
 
 function quoteFilterString(value: string): string {

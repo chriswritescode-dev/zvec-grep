@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -630,6 +630,44 @@ test("missing-index search does not auto-initialize when opted out or disabled",
     );
     assert.equal(backend.scheduler.getByRoot(canonicalRoot), undefined);
   } finally {
+    await backend.close();
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test("missing-index search does not auto-initialize for a home directory root", async () => {
+  const temporaryDirectory = await mkdtemp(
+    join(tmpdir(), "zvec-grep-auto-init-broad-"),
+  );
+  const home = join(temporaryDirectory, "home");
+  await mkdir(home);
+  await writeFile(join(home, "answer.ts"), "export const answer = 42;\n");
+  const previousHome = process.env.HOME;
+  process.env.HOME = home;
+  const backend = new DaemonBackend({
+    version: "1.0.0",
+    modelPoolOptions: { createModel: () => new TestEmbeddingModel() },
+    watchManagerFactory: noopWatchManagerFactory,
+  });
+  try {
+    const canonicalHome = await realpath(home);
+    await assert.rejects(
+      backend.search(searchInput(home, "answer", "eventual")),
+      (error) =>
+        error.code === "INDEX_MISSING" &&
+        error.message.includes(canonicalHome) &&
+        error.message.includes("home directory or filesystem root") &&
+        error.message.includes("specific project root") &&
+        error.message.includes("exact-search fallback"),
+    );
+    assert.equal(backend.scheduler.getByRoot(canonicalHome), undefined);
+    assert.equal(existsSync(workspaceIndexLocation(canonicalHome).home), false);
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
     await backend.close();
     await rm(temporaryDirectory, { recursive: true, force: true });
   }

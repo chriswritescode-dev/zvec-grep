@@ -382,3 +382,51 @@ test("finalize waits for metadata optimization and does not repeat it after succ
     storage.close();
   }
 });
+
+test("file id filters chunk large id lists without dropping matches", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "zvec-grep-filter-chunks-"));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const storage = createWorkspaceIndexStorage(storageOptions(parent));
+  const writeFile = (id) => {
+    const file = fileInfo(id, parent, `${id}.ts`);
+    storage.replaceFile(file, [
+      {
+        fragment: {
+          id,
+          fileId: file.id,
+          range: {
+            kind: "text",
+            startLine: 1,
+            endLine: 1,
+            startOffset: 0,
+            endOffset: 6,
+          },
+          content: { kind: "text", text: "shared" },
+        },
+        vector: [1, 0],
+      },
+    ]);
+    return file;
+  };
+  try {
+    const target = writeFile("a");
+    writeFile("b");
+    writeFile("c");
+    const syntheticIds = Array.from({ length: 25_000 }, (_, index) =>
+      index.toString(16).padStart(64, "0"),
+    );
+    const filter = { fileIds: [target.id, ...syntheticIds] };
+    const ftsHits = storage.searchFts("shared", 10, filter);
+    assert.deepEqual(
+      ftsHits.map((hit) => hit.file.id),
+      [target.id],
+    );
+    const vectorHits = storage.searchVector([1, 0], 10, filter);
+    assert.deepEqual(
+      vectorHits.map((hit) => hit.file.id),
+      [target.id],
+    );
+  } finally {
+    storage.close();
+  }
+});
