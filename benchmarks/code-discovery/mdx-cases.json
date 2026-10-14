@@ -1,0 +1,513 @@
+{
+  "schema": "code-discovery-cases/1",
+  "description": "Source-backed screening suite of 30 natural-language code-discovery queries over the mdx-mono monorepo (apps/backend, apps/web, apps/mobile). Each case names 1-3 implementation files that directly satisfy the asked user or developer intent; documentation, tests, generated types, and fixtures are excluded as targets. Roughly 15 backend, 10 web, and 5 mobile cases.",
+  "cases": [
+    {
+      "id": "backend-bearer-auth-pipeline",
+      "query": "How does an incoming API request turn a bearer token into the local user record, lazily creating one on first sight and refusing a soft-deleted account?",
+      "targets": ["apps/backend/app/core/auth/__init__.py"],
+      "evidence": [
+        {
+          "path": "apps/backend/app/core/auth/__init__.py",
+          "symbol": "authenticate_bearer",
+          "reason": "The full bearer-authentication pipeline: extract the token, verify it, refuse an impersonated actor session, then resolve or create the local user."
+        },
+        {
+          "path": "apps/backend/app/core/auth/__init__.py",
+          "symbol": "resolve_or_create_user",
+          "reason": "Looks up the local user by external subject, creates it from the provider profile on first sight, and rejects a deleted user."
+        }
+      ]
+    },
+    {
+      "id": "backend-clerk-token-verification",
+      "query": "Where is a Clerk session token cryptographically verified against the identity provider's published signing keys, and how is an impersonation actor claim surfaced?",
+      "targets": ["apps/backend/app/core/auth/clerk.py"],
+      "evidence": [
+        {
+          "path": "apps/backend/app/core/auth/clerk.py",
+          "symbol": "ClerkAuthProvider.verify_token",
+          "reason": "Verifies the token in a worker thread, requires a subject claim, and returns an AuthClaims carrying the impersonation actor subject when present."
+        },
+        {
+          "path": "apps/backend/app/core/auth/clerk.py",
+          "symbol": "_verify_sync",
+          "reason": "Fetches the signing key from the cached JWKS client and decodes the RS256 JWT with the configured issuer and leeway."
+        }
+      ]
+    },
+    {
+      "id": "backend-role-model",
+      "query": "Where are the platform's user roles defined, including the rule that an administrator implicitly passes every role and ownership check?",
+      "targets": ["apps/backend/app/core/roles.py"],
+      "evidence": [
+        {
+          "path": "apps/backend/app/core/roles.py",
+          "symbol": "Role",
+          "reason": "The StrEnum of stackable user roles (USER, CREATOR, CURATOR, ADMIN) whose docstring states that ADMIN implicitly satisfies any role check."
+        }
+      ]
+    },
+    {
+      "id": "backend-channel-management-authority",
+      "query": "Who may manage a channel's feed and metadata when the channel is owned by a network rather than an individual, and how is that authority decided at request time?",
+      "targets": ["apps/backend/app/networks/authority.py"],
+      "evidence": [
+        {
+          "path": "apps/backend/app/networks/authority.py",
+          "symbol": "can_manage_channel",
+          "reason": "The single authority decision: admins and owners always pass, and a network-owned channel is manageable by the owning network's owner or operator, read fresh each request."
+        },
+        {
+          "path": "apps/backend/app/networks/authority.py",
+          "symbol": "require_channel_manager",
+          "reason": "Turns a failed authority check into the not_owner authorization error used by channel mutation endpoints."
+        }
+      ]
+    },
+    {
+      "id": "backend-video-playback-access",
+      "query": "How does the backend decide whether a viewer may play a specific video, weighing ownership, purchases, free status, channel publication, and creator or collection subscriptions?",
+      "targets": ["apps/backend/app/entitlements/access.py"],
+      "evidence": [
+        {
+          "path": "apps/backend/app/entitlements/access.py",
+          "symbol": "AccessService.check_video_access",
+          "reason": "Ordered access ladder covering admin/owner, durable purchase, published-and-free, registered grants, channel-owner review, creator subscription, and collection subscription."
+        },
+        {
+          "path": "apps/backend/app/entitlements/access.py",
+          "symbol": "AccessService.can_read_video",
+          "reason": "Separates metadata readability from playback, allowing a live published video to be read while restricting drafts to owners, admins, or purchasers."
+        }
+      ]
+    },
+    {
+      "id": "backend-upload-part-planning",
+      "query": "How is the multipart part size and part count computed for a video upload whose declared size may be unknown or very large, and where are upload concurrency and stale-session rules enforced?",
+      "targets": ["apps/backend/app/videos/service.py"],
+      "evidence": [
+        {
+          "path": "apps/backend/app/videos/service.py",
+          "symbol": "compute_part_plan",
+          "reason": "Derives the frozen part size and part count from an optional declared size, doubling the size until the upload fits the part ceiling and using integer ceiling division."
+        },
+        {
+          "path": "apps/backend/app/videos/service.py",
+          "symbol": "VideoService.initiate_upload",
+          "reason": "Validates content type and size, serializes concurrent initiates with advisory locks, and reclaims stale UPLOADING sessions before creating a replacement."
+        }
+      ]
+    },
+    {
+      "id": "backend-ingest-transcode-completion",
+      "query": "When an uploaded video finishes transcoding, how does the completion handler attach the new renditions, activate the source, and move a draft video forward?",
+      "targets": ["apps/backend/app/webhooks/ingest.py"],
+      "evidence": [
+        {
+          "path": "apps/backend/app/webhooks/ingest.py",
+          "symbol": "handle_transcode_completed",
+          "reason": "Idempotently marks the source ready, records renditions, activates the source on the video, and returns a draft to the owner-facing flow."
+        },
+        {
+          "path": "apps/backend/app/webhooks/ingest.py",
+          "symbol": "handle_analysis_completed",
+          "reason": "Handles the parallel analysis completion that decides whether a source is cleared to proceed toward transcoding."
+        }
+      ]
+    },
+    {
+      "id": "backend-content-analysis-dispatch",
+      "query": "How is a serverless content-analysis function invoked for an uploaded video, including minting an identity token and posting the payload?",
+      "targets": ["apps/backend/app/jobs/content_analysis.py"],
+      "evidence": [
+        {
+          "path": "apps/backend/app/jobs/content_analysis.py",
+          "symbol": "request_content_analysis_job",
+          "reason": "The broker task that loads the source file and dispatches the analysis request to the configured function URL."
+        },
+        {
+          "path": "apps/backend/app/jobs/content_analysis.py",
+          "symbol": "_invoke_function",
+          "reason": "Mints an OIDC identity token, posts the payload with a short-lived HTTP client, and raises on a non-2xx response."
+        }
+      ]
+    },
+    {
+      "id": "backend-transcode-pubsub-webhook",
+      "query": "How does the backend verify and handle a Pub/Sub push notification that a transcoding job succeeded, and how does it locate the matching source file?",
+      "targets": ["apps/backend/app/webhooks/gcp_transcoder.py"],
+      "evidence": [
+        {
+          "path": "apps/backend/app/webhooks/gcp_transcoder.py",
+          "symbol": "handle_pubsub_push",
+          "reason": "Verifies the OIDC bearer on the push, decodes the job notification, and on success builds the rendition list before delegating to the ingest completion handler."
+        },
+        {
+          "path": "apps/backend/app/webhooks/gcp_transcoder.py",
+          "symbol": "_find_source_file_by_job",
+          "reason": "Maps the provider job name back to the source file row that started the transcode."
+        }
+      ]
+    },
+    {
+      "id": "backend-transcode-reconciliation",
+      "query": "How does a periodic sweeper recover source files stuck in a processing state by polling the transcoding provider and dispatching the right completion or failure handler?",
+      "targets": ["apps/backend/app/jobs/transcoder_reconcile.py"],
+      "evidence": [
+        {
+          "path": "apps/backend/app/jobs/transcoder_reconcile.py",
+          "symbol": "transcoder_reconcile_sweeper",
+          "reason": "The scheduled broker task that selects stuck processing sources and drives reconciliation."
+        },
+        {
+          "path": "apps/backend/app/jobs/transcoder_reconcile.py",
+          "symbol": "_reconcile_one",
+          "reason": "Polls one job's status and dispatches to the success or failure ingest handler based on the provider result."
+        }
+      ]
+    },
+    {
+      "id": "backend-video-view-heartbeat",
+      "query": "How does a playback heartbeat open or update a viewing session, throttle rapid beats, detect a completed watch, and decide when the play threshold is crossed?",
+      "targets": ["apps/backend/app/views/service.py"],
+      "evidence": [
+        {
+          "path": "apps/backend/app/views/service.py",
+          "symbol": "VideoViewService.heartbeat",
+          "reason": "Finds the open session, throttles rapid beats, opens or updates the row, handles completion, and then evaluates the threshold."
+        },
+        {
+          "path": "apps/backend/app/views/service.py",
+          "symbol": "VideoViewService._maybe_cross_threshold",
+          "reason": "Applies the duration-relative threshold rule and fires the canonical view event on the false-to-true transition."
+        }
+      ]
+    },
+    {
+      "id": "backend-email-notification-dispatch",
+      "query": "How does the background email task route a notification kind and entity id to the correct templated message, such as a purchase receipt or a channel invitation?",
+      "targets": ["apps/backend/app/jobs/email.py"],
+      "evidence": [
+        {
+          "path": "apps/backend/app/jobs/email.py",
+          "symbol": "dispatch_email",
+          "reason": "Free-function dispatcher that loads the entity for the notification kind and calls the matching send helper."
+        },
+        {
+          "path": "apps/backend/app/jobs/email.py",
+          "symbol": "send_email_job",
+          "reason": "The broker task entry point that opens a session and delegates to dispatch_email."
+        }
+      ]
+    },
+    {
+      "id": "backend-network-invitation-acceptance",
+      "query": "How does a user accept a network invitation, including the email-match check and the lifecycle state transition?",
+      "targets": ["apps/backend/app/networks/invitations.py"],
+      "evidence": [
+        {
+          "path": "apps/backend/app/networks/invitations.py",
+          "symbol": "NetworkInvitationService.accept",
+          "reason": "Locks the invitation, validates it is pending and unexpired, applies the invitee email check, and transitions it to accepted."
+        },
+        {
+          "path": "apps/backend/app/networks/invitations.py",
+          "symbol": "NetworkInvitationService._require_invitee_email",
+          "reason": "Refuses acceptance when the signed-in user's normalized email does not match the invitation's target email."
+        }
+      ]
+    },
+    {
+      "id": "backend-subscription-checkout",
+      "query": "How is a creator subscription checkout prepared and run against the payment provider, including ensuring a customer and handling a creator without an active payout account?",
+      "targets": ["apps/backend/app/billing/checkout.py"],
+      "evidence": [
+        {
+          "path": "apps/backend/app/billing/checkout.py",
+          "symbol": "CheckoutService",
+          "reason": "Owns subscription and video checkout orchestration against the payment provider, including customer setup and destination fallback."
+        },
+        {
+          "path": "apps/backend/app/billing/checkout.py",
+          "symbol": "run_subscription_checkout",
+          "reason": "Prepares and executes a subscription checkout with the destination-account fallback path."
+        }
+      ]
+    },
+    {
+      "id": "backend-error-response-mapping",
+      "query": "How are application errors, request validation failures, and unexpected exceptions turned into the consistent JSON error envelope returned to API clients?",
+      "targets": ["apps/backend/app/core/exception_handlers.py"],
+      "evidence": [
+        {
+          "path": "apps/backend/app/core/exception_handlers.py",
+          "symbol": "app_error_handler",
+          "reason": "Maps a domain AppError to its status code and a code/message/details error envelope."
+        },
+        {
+          "path": "apps/backend/app/core/exception_handlers.py",
+          "symbol": "register_exception_handlers",
+          "reason": "Registers the domain, validation, and catch-all handlers on the FastAPI app so every failure shares one envelope shape."
+        }
+      ]
+    },
+    {
+      "id": "web-clerk-session-middleware",
+      "query": "Where does the web app run Clerk's middleware to verify and refresh the session that server-side auth reads, and why does it deliberately gate no routes there?",
+      "targets": ["apps/web/src/proxy.ts"],
+      "evidence": [
+        {
+          "path": "apps/web/src/proxy.ts",
+          "symbol": "clerkMiddlewareOptions",
+          "reason": "Configures the sign-in and sign-up URLs passed to Clerk's middleware."
+        },
+        {
+          "path": "apps/web/src/proxy.ts",
+          "symbol": "config",
+          "reason": "The matcher that runs Clerk middleware across routes so the session is verified and refreshed without gating any path."
+        }
+      ]
+    },
+    {
+      "id": "web-http-data-layer",
+      "query": "Where does the portal's HTTP layer attach the bearer token, enforce a request timeout, parse the backend error envelope, and validate responses against a schema?",
+      "targets": ["apps/web/src/lib/http.ts"],
+      "evidence": [
+        {
+          "path": "apps/web/src/lib/http.ts",
+          "symbol": "httpClient",
+          "reason": "Resolves the auth token before the fetch timeout, attaches the bearer header, parses the error envelope into ApiError, and validates bodies with Zod."
+        },
+        {
+          "path": "apps/web/src/lib/http.ts",
+          "symbol": "getItem",
+          "reason": "One of the envelope-unwrapping helpers that reads the data field and validates it against the caller's schema."
+        }
+      ]
+    },
+    {
+      "id": "web-user-scoped-query-keys",
+      "query": "How are TanStack Query cache keys namespaced and scoped by user id so cached data cannot leak between accounts?",
+      "targets": ["apps/web/src/lib/query/keys.ts"],
+      "evidence": [
+        {
+          "path": "apps/web/src/lib/query/keys.ts",
+          "symbol": "qk",
+          "reason": "The query key factory whose collection, channel, network, and other list/detail keys all thread the userId through the key tuple."
+        }
+      ]
+    },
+    {
+      "id": "web-multipart-upload-client",
+      "query": "How does the web upload client split a file into parts using the server-supplied part size, upload them concurrently with retries, and resume from already-uploaded parts?",
+      "targets": ["apps/web/src/features/upload/multipart.ts"],
+      "evidence": [
+        {
+          "path": "apps/web/src/features/upload/multipart.ts",
+          "symbol": "planParts",
+          "reason": "Plans byte-range parts from the file size and the server-supplied part size rather than any client constant."
+        },
+        {
+          "path": "apps/web/src/features/upload/multipart.ts",
+          "symbol": "buildResumePlan",
+          "reason": "Reads the upload session and already-uploaded parts to seed a resume plan when a transfer is retried."
+        },
+        {
+          "path": "apps/web/src/features/upload/multipart.ts",
+          "symbol": "uploadFileMultipart",
+          "reason": "Uploads parts with bounded concurrency and per-part retry/backoff, then completes the multipart session."
+        }
+      ]
+    },
+    {
+      "id": "web-agent-chat-bridge",
+      "query": "How does the portal forward an authenticated assistant chat turn to the backend agent runtime as a streaming response without minting its own token?",
+      "targets": [
+        "apps/web/src/features/agents/assistant/agui/agent-session-bridge.ts"
+      ],
+      "evidence": [
+        {
+          "path": "apps/web/src/features/agents/assistant/agui/agent-session-bridge.ts",
+          "symbol": "AgentSessionBridge",
+          "reason": "An HttpAgent whose constructor points at the backend AG-UI path with the caller's captured bearer token and no token of its own."
+        },
+        {
+          "path": "apps/web/src/features/agents/assistant/agui/agent-session-bridge.ts",
+          "symbol": "run",
+          "reason": "Wraps the streaming run in an abortable observable and converts errors into a run-error event instead of dropping the stream."
+        }
+      ]
+    },
+    {
+      "id": "web-cms-media-public-url",
+      "query": "How are CMS media URLs generated at read time from the configured public storage base, and what happens to the storage plugin when S3 is not configured?",
+      "targets": ["apps/web/src/cms/media/storage.ts"],
+      "evidence": [
+        {
+          "path": "apps/web/src/cms/media/storage.ts",
+          "symbol": "mediaStoragePlugin",
+          "reason": "Enables the S3 plugin only when storage config resolves and supplies a generateFileURL that builds a public media URL from the base URL, prefix, and filename."
+        },
+        {
+          "path": "apps/web/src/cms/media/storage.ts",
+          "symbol": "readMediaStorageConfigOrNull",
+          "reason": "Falls back to a disabled storage plugin with a logged error when S3 configuration is missing or invalid."
+        }
+      ]
+    },
+    {
+      "id": "web-cms-cache-revalidation",
+      "query": "After a CMS page, home global, or marketing media changes, how are the ISR tag and path caches invalidated, and how is revalidation skipped outside a request scope?",
+      "targets": ["apps/web/src/cms/revalidate.ts"],
+      "evidence": [
+        {
+          "path": "apps/web/src/cms/revalidate.ts",
+          "symbol": "revalidateHomeGlobal",
+          "reason": "A Payload after-change hook that invalidates both the home tag and the root path when the home global changes."
+        },
+        {
+          "path": "apps/web/src/cms/revalidate.ts",
+          "symbol": "revalidatePageDoc",
+          "reason": "Invalidates the current and previous page slugs so a renamed page leaves no stale ISR entry."
+        },
+        {
+          "path": "apps/web/src/cms/revalidate.ts",
+          "symbol": "revalidateUnlessDisabled",
+          "reason": "Skips revalidation when the write ran outside a request scope with disableRevalidate set."
+        }
+      ]
+    },
+    {
+      "id": "web-query-error-retry",
+      "query": "Where is the shared UI that shows a failed data load with a retry action?",
+      "targets": ["apps/web/src/components/query-error-retry.tsx"],
+      "evidence": [
+        {
+          "path": "apps/web/src/components/query-error-retry.tsx",
+          "symbol": "QueryErrorRetry",
+          "reason": "A shared alert component that renders the failure message and a Retry button wired to the caller's retry callback."
+        }
+      ]
+    },
+    {
+      "id": "web-role-aware-sidebar-nav",
+      "query": "How does the portal sidebar build its navigation links differently for creators, curators, and administrators?",
+      "targets": ["apps/web/src/components/portal-shell/sidebar-nav.tsx"],
+      "evidence": [
+        {
+          "path": "apps/web/src/components/portal-shell/sidebar-nav.tsx",
+          "symbol": "SidebarNav",
+          "reason": "Reads the current user's roles and composes the role-dependent navigation groups, adding curator and admin sections conditionally."
+        },
+        {
+          "path": "apps/web/src/components/portal-shell/sidebar-nav.tsx",
+          "symbol": "ADMIN_NAV_ITEMS",
+          "reason": "The admin-only navigation group appended when the user is an administrator."
+        }
+      ]
+    },
+    {
+      "id": "web-task-form-validation",
+      "query": "How are acquisition task form inputs validated and converted into the backend payload, including target count and money fields?",
+      "targets": ["apps/web/src/features/agents/tasks/task-form-validation.ts"],
+      "evidence": [
+        {
+          "path": "apps/web/src/features/agents/tasks/task-form-validation.ts",
+          "symbol": "validateTaskForm",
+          "reason": "Validates each field, collects errors, and maps the form values to the snake_case backend payload with cents-based money fields."
+        },
+        {
+          "path": "apps/web/src/features/agents/tasks/task-form-validation.ts",
+          "symbol": "budgetReadout",
+          "reason": "Computes the worst-case spend from target count and per-video price against the cap, treating an empty cap as uncapped."
+        }
+      ]
+    },
+    {
+      "id": "mobile-http-envelope",
+      "query": "How does the mobile API client parse the backend's item and list envelopes, surface error codes, and validate responses with Zod?",
+      "targets": ["apps/mobile/src/lib/http.ts"],
+      "evidence": [
+        {
+          "path": "apps/mobile/src/lib/http.ts",
+          "symbol": "request",
+          "reason": "Attaches the bearer token, enforces the timeout, extracts the error object into ApiError, and validates the response with the caller's Zod schema."
+        },
+        {
+          "path": "apps/mobile/src/lib/http.ts",
+          "symbol": "httpClient",
+          "reason": "The public client whose getItem/getList helpers unwrap the item and list envelopes for feature hooks."
+        }
+      ]
+    },
+    {
+      "id": "mobile-auth-headers",
+      "query": "How does the mobile app expose a stable auth object to feature hooks while detecting that the signed-in identity changed mid-request?",
+      "targets": ["apps/mobile/src/lib/auth/use-auth-headers.ts"],
+      "evidence": [
+        {
+          "path": "apps/mobile/src/lib/auth/use-auth-headers.ts",
+          "symbol": "useAuthHeaders",
+          "reason": "Returns a memoized AuthOption whose getToken throws when the current identity no longer matches the identity that created it, keeping the object identity stable per user."
+        },
+        {
+          "path": "apps/mobile/src/lib/auth/use-auth-headers.ts",
+          "symbol": "AuthIdentityChangedError",
+          "reason": "The typed error raised when credentials for the captured user are no longer available."
+        }
+      ]
+    },
+    {
+      "id": "mobile-query-keys",
+      "query": "Where is the mobile app's TanStack Query key factory, including the helpers for matching key prefixes and recognizing channel feed keys?",
+      "targets": ["apps/mobile/src/lib/query/keys.ts"],
+      "evidence": [
+        {
+          "path": "apps/mobile/src/lib/query/keys.ts",
+          "symbol": "qk",
+          "reason": "The central key factory covering users, channels, videos, library, subscriptions, billing, and agent queries."
+        },
+        {
+          "path": "apps/mobile/src/lib/query/keys.ts",
+          "symbol": "matchesQueryKeyPrefix",
+          "reason": "Shared helper for matching a query key against a prefix used by targeted invalidations."
+        }
+      ]
+    },
+    {
+      "id": "mobile-env-validation",
+      "query": "How are required mobile environment variables validated at import time so a missing API base URL or Clerk key crashes early?",
+      "targets": ["apps/mobile/src/lib/env.ts"],
+      "evidence": [
+        {
+          "path": "apps/mobile/src/lib/env.ts",
+          "symbol": "EnvSchema",
+          "reason": "The Zod schema declaring the required Clerk, API, and app base URLs plus optional feature flags and their defaults."
+        },
+        {
+          "path": "apps/mobile/src/lib/env.ts",
+          "symbol": "env",
+          "reason": "The parsed export that throws a descriptive error listing invalid variables when validation fails at import time."
+        }
+      ]
+    },
+    {
+      "id": "mobile-upload-orchestration",
+      "query": "How does the mobile upload flow create a draft video, initiate or resume a session, upload parts, wait for the source to become ready, and report phases back to the UI?",
+      "targets": ["apps/mobile/src/features/upload/run-video-upload.ts"],
+      "evidence": [
+        {
+          "path": "apps/mobile/src/features/upload/run-video-upload.ts",
+          "symbol": "runVideoUpload",
+          "reason": "The orchestrator that handles fresh and resume paths, emits session/phase events, and returns the video and source file."
+        },
+        {
+          "path": "apps/mobile/src/features/upload/run-video-upload.ts",
+          "symbol": "waitForSourceReady",
+          "reason": "Polls the source file with a bounded backoff until processing settles before finalizing the upload."
+        }
+      ]
+    }
+  ]
+}

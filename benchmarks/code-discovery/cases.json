@@ -1,0 +1,105 @@
+{
+  "schema": "code-discovery-cases/1",
+  "cases": [
+    {
+      "id": "single-directory-indexing",
+      "query": "Where is the location chosen for keeping all workspace indexes under one shared directory instead of inside each project?",
+      "targets": ["src/engine/service/root.ts"]
+    },
+    {
+      "id": "absent-index-creation",
+      "query": "Where does a search request start a background build when the workspace has never been indexed?",
+      "targets": ["src/daemon/backend.ts"]
+    },
+    {
+      "id": "model-cache-lock-recovery",
+      "query": "How does the model downloader recover an artifact cache lock left behind by a process that died?",
+      "targets": ["src/engine/models/artifact-cache-lock.ts"]
+    },
+    {
+      "id": "model-download-fallback",
+      "query": "What happens when model artifacts fail to download from Hugging Face and the downloader tries ModelScope instead?",
+      "targets": ["src/engine/models/artifact-downloader.ts"]
+    },
+    {
+      "id": "lease-publishing",
+      "query": "How does the daemon publish and keep alive the lease that owns a workspace root?",
+      "targets": ["src/daemon/root-lease.ts"]
+    },
+    {
+      "id": "writer-coordination",
+      "query": "How are file locks used to coordinate concurrent writers touching the same workspace directory?",
+      "targets": ["src/engine/utils/lock.ts"]
+    },
+    {
+      "id": "ignore-filtering",
+      "query": "How are gitignore rules applied while scanning a directory tree for files to index?",
+      "targets": ["src/engine/pipeline/indexing/scanner/index.ts"]
+    },
+    {
+      "id": "entity-extraction",
+      "query": "How are code entities and symbols extracted from a source file?",
+      "targets": ["src/engine/extraction/code/extractor.ts"]
+    },
+    {
+      "id": "fusion",
+      "query": "How does reciprocal rank fusion combine full text and vector search candidates into one ranking?",
+      "targets": ["src/engine/pipeline/search/index.ts"]
+    },
+    {
+      "id": "model-selection",
+      "query": "How is the embedding model reference chosen from explicit options, an existing index, environment variables, and defaults?",
+      "targets": ["src/engine/models/resolution.ts"]
+    },
+    {
+      "id": "model-catalog",
+      "query": "Where is the catalog of supported embedding models with their dimensions and backends defined?",
+      "targets": ["src/engine/models/catalog.ts"]
+    },
+    {
+      "id": "model-recovery",
+      "query": "How does the search service recreate and reuse the embedding model recorded in an existing index?",
+      "targets": ["src/engine/service/zvec-grep.ts"]
+    },
+    {
+      "id": "file-type-selection",
+      "query": "How are file type patterns turned into include and exclude decisions during a search?",
+      "targets": ["src/engine/utils/file-selection.ts"]
+    },
+    {
+      "id": "glob-matching",
+      "query": "How is a glob path pattern matched against a workspace relative file path?",
+      "targets": ["src/engine/utils/glob.ts"]
+    },
+    {
+      "id": "index-storage-layout",
+      "query": "Where are the separate file and entity collection paths constructed inside an index storage directory?",
+      "targets": ["src/engine/storage/layout.ts"]
+    },
+    {
+      "id": "workspace-manifest",
+      "query": "How does the manifest record an index policy and its embedding runtime?",
+      "targets": ["src/engine/manifest.ts"]
+    },
+    {
+      "id": "mcp-toolset",
+      "query": "How does the MCP server decide which search and indexing tools to expose?",
+      "targets": ["src/mcp/toolset.ts"]
+    },
+    {
+      "id": "context-formatting",
+      "query": "How are ranked context search results formatted for the command line and for agents?",
+      "targets": ["src/cli/format/context.ts"]
+    },
+    {
+      "id": "grammar-loading",
+      "query": "How does the tree-sitter layer load the grammar for a supported source language?",
+      "targets": ["src/engine/extraction/code/tree-sitter/grammar.ts"]
+    },
+    {
+      "id": "index-input-budget",
+      "query": "How does the indexing pipeline budget and chunk embedding input for large files?",
+      "targets": ["src/engine/pipeline/indexing/input-budget.ts"]
+    }
+  ]
+}
